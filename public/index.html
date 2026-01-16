@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NANO 图像生成器</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎨</text></svg>">
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <div class="header-left">
+        <h1 class="logo">🎨 NANO 图像生成器</h1>
+      </div>
+      <div class="header-right">
+        <button id="themeToggle" class="btn btn-icon" title="切换主题">
+          <span class="theme-icon">🌙</span>
+        </button>
+        <button id="settingsBtn" class="btn btn-secondary">
+          <span>⚙️</span> API 设置
+        </button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="text2img">📝 文生图</button>
+        <button class="tab-btn" data-tab="img2img">🖼️ 图生图</button>
+      </div>
+
+      <div class="content-wrapper">
+        <div class="input-panel">
+          <!-- 比例选择器（两个Tab共享） -->
+          <div class="form-group">
+            <label>图片比例</label>
+            <div class="ratio-selector">
+              <div class="ratio-card active" data-ratio="portrait" data-model="gemini-3.0-pro-image-portrait">
+                <div class="ratio-preview ratio-portrait"></div>
+                <div class="ratio-label">
+                  <span class="ratio-icon">📐</span>
+                  <span class="ratio-name">竖版</span>
+                  <span class="ratio-sub">Portrait</span>
+                </div>
+              </div>
+              <div class="ratio-card" data-ratio="landscape" data-model="gemini-3.0-pro-image-landscape">
+                <div class="ratio-preview ratio-landscape"></div>
+                <div class="ratio-label">
+                  <span class="ratio-icon">📐</span>
+                  <span class="ratio-name">横版</span>
+                  <span class="ratio-sub">Landscape</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="text2imgPanel" class="tab-panel active">
+            <div class="form-group">
+              <label for="promptInput">提示词</label>
+              <textarea 
+                id="promptInput" 
+                class="prompt-input" 
+                placeholder="描述你想要生成的图片，例如：一只可爱的橘猫在樱花树下睡觉，日系插画风格..."
+                rows="4"
+              ></textarea>
+            </div>
+            
+            <div class="form-group">
+              <label>快捷模板</label>
+              <div class="template-tags">
+                <button class="template-tag" data-template="photorealistic, high quality, detailed, 8k, professional photography">📷 写实</button>
+                <button class="template-tag" data-template="anime style, vibrant colors, detailed illustration, Studio Ghibli">🎌 动漫</button>
+                <button class="template-tag" data-template="oil painting style, classical, artistic, museum quality">🎨 油画</button>
+                <button class="template-tag" data-template="watercolor painting, soft colors, artistic, dreamy">💧 水彩</button>
+                <button class="template-tag" data-template="pixel art style, retro, 16-bit, nostalgic">👾 像素</button>
+                <button class="template-tag" data-template="cyberpunk style, neon lights, futuristic, sci-fi">🌃 赛博朋克</button>
+                <button class="template-tag" data-template="minimalist, clean, modern design, simple">✨ 极简</button>
+                <button class="template-tag" data-template="Chinese ink painting, traditional, elegant, artistic">🖌️ 国风水墨</button>
+              </div>
+            </div>
+
+            <button id="generateBtn" class="btn btn-primary btn-large">
+              <span class="btn-text">🎯 生成图片</span>
+              <span class="btn-loading hidden">⏳ 生成中...</span>
+            </button>
+          </div>
+
+          <div id="img2imgPanel" class="tab-panel">
+            <div class="form-group">
+              <label for="editPromptInput">编辑提示词</label>
+              <textarea 
+                id="editPromptInput" 
+                class="prompt-input" 
+                placeholder="描述你想要对图片进行的修改，例如：把背景改成星空、添加一顶红色帽子..."
+                rows="3"
+              ></textarea>
+            </div>
+
+            <div class="form-group">
+              <label>主图片 <span class="required">*</span></label>
+              <div class="upload-zone" id="mainImageZone">
+                <div class="upload-placeholder">
+                  <span class="upload-icon">📤</span>
+                  <p>点击或拖拽上传图片</p>
+                  <p class="upload-hint">支持 JPG、PNG、WebP，最大 20MB</p>
+                </div>
+                <img class="upload-preview hidden" id="mainImagePreview" alt="主图片预览">
+                <button class="btn-remove hidden" id="removeMainImage">✕</button>
+                <input type="file" id="mainImageInput" accept="image/*" hidden>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>参考图片 <span class="optional">(可选，最多5张)</span></label>
+              <div class="reference-images-container">
+                <div class="upload-zone upload-zone-small" id="refImageZone">
+                  <div class="upload-placeholder">
+                    <span class="upload-icon">➕</span>
+                    <p>添加参考图</p>
+                  </div>
+                  <input type="file" id="refImageInput" accept="image/*" multiple hidden>
+                </div>
+                <div class="reference-previews" id="referencePreviews"></div>
+              </div>
+            </div>
+
+            <button id="editBtn" class="btn btn-primary btn-large">
+              <span class="btn-text">✏️ 编辑图片</span>
+              <span class="btn-loading hidden">⏳ 处理中...</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="result-panel">
+          <div class="result-header">
+            <h3>生成结果</h3>
+            <div class="result-actions hidden" id="resultActions">
+              <button id="downloadBtn" class="btn btn-secondary btn-small">💾 下载</button>
+              <button id="continueEditBtn" class="btn btn-secondary btn-small">✏️ 继续编辑</button>
+            </div>
+          </div>
+          
+          <div class="result-content" id="resultContent">
+            <div class="result-placeholder">
+              <span class="placeholder-icon">🖼️</span>
+              <p>生成的图片将显示在这里</p>
+            </div>
+          </div>
+
+          <div class="result-info hidden" id="resultInfo">
+            <div class="info-item">
+              <span class="info-label">提示词：</span>
+              <span class="info-value" id="resultPrompt"></span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">生成时间：</span>
+              <span class="info-value" id="resultTime"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="history-section">
+        <div class="history-header">
+          <h3>📜 历史记录</h3>
+          <button id="clearHistoryBtn" class="btn btn-text btn-small">清空历史</button>
+        </div>
+        <div class="history-grid" id="historyGrid">
+          <div class="history-empty">
+            <p>暂无历史记录</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="modal hidden" id="settingsModal">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>⚙️ API 设置</h3>
+          <button class="modal-close" id="closeSettingsBtn">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="apiKeyInput">API Key</label>
+            <div class="input-with-action">
+              <input 
+                type="password" 
+                id="apiKeyInput" 
+                class="input" 
+                placeholder="输入你的 Gemini API Key"
+              >
+              <button id="toggleApiKeyVisibility" class="btn btn-icon" title="显示/隐藏">👁️</button>
+            </div>
+            <p class="input-hint">API Key 仅保存在浏览器本地，不会上传到服务器</p>
+          </div>
+          <div class="form-group">
+            <label for="modelSelect">模型选择</label>
+            <select id="modelSelect" class="input">
+              <option value="gemini-3.0-pro-image-portrait">gemini-3.0-pro-image-portrait (默认)</option>
+              <option value="gemini-3.0-pro-image-landscape">gemini-3.0-pro-image-landscape</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="saveSettingsBtn" class="btn btn-primary">保存设置</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="imageModal">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content modal-large">
+        <button class="modal-close" id="closeImageModalBtn">✕</button>
+        <img id="modalImage" class="modal-image" alt="大图预览">
+        <div class="modal-image-actions">
+          <button id="modalDownloadBtn" class="btn btn-secondary">💾 下载</button>
+          <button id="modalEditBtn" class="btn btn-primary">✏️ 编辑此图</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/history.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
