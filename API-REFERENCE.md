@@ -16,10 +16,62 @@
 
 ## 可用模型
 
-| 模型名称 | 说明 |
-|----------|------|
-| `gemini-3.0-pro-image-portrait` | 竖版图片（Portrait），默认模型 |
-| `gemini-3.0-pro-image-landscape` | 横版图片（Landscape） |
+### Gemini 2.5 Flash（快速）
+
+| 模型名称 | 比例 | 说明 |
+|----------|------|------|
+| `gemini-2.5-flash-image-landscape` | 16:9 | 横屏 |
+| `gemini-2.5-flash-image-portrait` | 9:16 | 竖屏 |
+
+### Gemini 3.0 Pro（标准）
+
+| 模型名称 | 比例 | 说明 |
+|----------|------|------|
+| `gemini-3.0-pro-image-landscape` | 16:9 | 横屏 |
+| `gemini-3.0-pro-image-portrait` | 9:16 | 竖屏 |
+| `gemini-3.0-pro-image-square` | 1:1 | 正方形 |
+| `gemini-3.0-pro-image-four-three` | 4:3 | 横屏 |
+| `gemini-3.0-pro-image-three-four` | 3:4 | 竖屏 |
+
+### Gemini 3.0 Pro 2K（高清）
+
+| 模型名称 | 比例 | 说明 |
+|----------|------|------|
+| `gemini-3.0-pro-image-landscape-2k` | 16:9 | 横屏 2K |
+| `gemini-3.0-pro-image-portrait-2k` | 9:16 | 竖屏 2K |
+| `gemini-3.0-pro-image-square-2k` | 1:1 | 正方形 2K |
+| `gemini-3.0-pro-image-four-three-2k` | 4:3 | 横屏 2K |
+| `gemini-3.0-pro-image-three-four-2k` | 3:4 | 竖屏 2K |
+
+### Gemini 3.0 Pro 4K（超清）
+
+| 模型名称 | 比例 | 说明 |
+|----------|------|------|
+| `gemini-3.0-pro-image-landscape-4k` | 16:9 | 横屏 4K |
+| `gemini-3.0-pro-image-portrait-4k` | 9:16 | 竖屏 4K |
+| `gemini-3.0-pro-image-square-4k` | 1:1 | 正方形 4K |
+| `gemini-3.0-pro-image-four-three-4k` | 4:3 | 横屏 4K |
+| `gemini-3.0-pro-image-three-four-4k` | 3:4 | 竖屏 4K |
+
+### 模型命名规则
+
+```
+{版本}-image-{比例}[-分辨率]
+
+版本: gemini-2.5-flash / gemini-3.0-pro
+比例: portrait / landscape / square / four-three / three-four
+分辨率: 空(标准) / 2k / 4k
+```
+
+### 模型兼容性矩阵
+
+| 比例 | Flash | Pro 标准 | Pro 2K | Pro 4K |
+|------|-------|----------|--------|--------|
+| portrait (9:16) | ✓ | ✓ | ✓ | ✓ |
+| landscape (16:9) | ✓ | ✓ | ✓ | ✓ |
+| square (1:1) | ✗ | ✓ | ✓ | ✓ |
+| four-three (4:3) | ✗ | ✓ | ✓ | ✓ |
+| three-four (3:4) | ✗ | ✓ | ✓ | ✓ |
 
 ## 认证
 
@@ -45,7 +97,7 @@ Authorization: Bearer YOUR_API_KEY
 
 ```json
 {
-  "model": "gemini-3.0-pro-image-portrait",
+  "model": "gemini-3.0-pro-image-landscape",
   "stream": true,
   "messages": [
     {
@@ -74,7 +126,7 @@ Authorization: Bearer YOUR_API_KEY
 ### JavaScript 示例
 
 ```javascript
-async function generateImage(prompt, apiKey, model = 'gemini-3.0-pro-image-portrait') {
+async function generateImage(prompt, apiKey, model = 'gemini-3.0-pro-image-landscape') {
   const payload = {
     model,
     stream: true,
@@ -101,7 +153,6 @@ async function generateImage(prompt, apiKey, model = 'gemini-3.0-pro-image-portr
     throw new Error(`API 请求失败: ${response.status}`);
   }
 
-  // 读取流式响应
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let fullText = '';
@@ -112,7 +163,6 @@ async function generateImage(prompt, apiKey, model = 'gemini-3.0-pro-image-portr
     fullText += decoder.decode(value, { stream: true });
   }
 
-  // 从响应中提取图片 URL
   const imageUrl = extractImageUrl(fullText);
   return imageUrl;
 }
@@ -144,7 +194,7 @@ function extractImageUrl(text) {
 
 ```json
 {
-  "model": "gemini-3.0-pro-image-portrait",
+  "model": "gemini-3.0-pro-image-landscape",
   "stream": true,
   "messages": [
     {
@@ -197,13 +247,11 @@ async function editImage(prompt, mainImageBase64, apiKey, model, referenceImages
     { type: 'text', text: prompt }
   ];
 
-  // 添加主图片（必须）
   contentParts.push({
     type: 'image_url',
-    image_url: { url: mainImageBase64 }  // 格式: data:image/png;base64,...
+    image_url: { url: mainImageBase64 }
   });
 
-  // 添加参考图片（可选，最多5张）
   for (const refBase64 of referenceImages) {
     contentParts.push({
       type: 'image_url',
@@ -241,7 +289,7 @@ async function editImage(prompt, mainImageBase64, apiKey, model, referenceImages
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);  // 返回 data:image/xxx;base64,...
+    reader.onload = () => resolve(reader.result);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -279,7 +327,6 @@ Google Storage 的图片 URL 有 CORS 限制，前端无法直接下载。解决
 1. **后端代理**（推荐）：通过后端代理请求图片
 
 ```javascript
-// 后端 Express 路由
 app.get('/api/proxy-image', async (req, res) => {
   const { url } = req.query;
   const imageResponse = await fetch(url);
@@ -288,7 +335,6 @@ app.get('/api/proxy-image', async (req, res) => {
   res.send(buffer);
 });
 
-// 前端调用
 const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(imageUrl)}`;
 const imageResponse = await fetch(proxyUrl);
 const blob = await imageResponse.blob();
@@ -333,9 +379,8 @@ const API_BASE_URL = 'https://api.yyds168.net/v1/chat/completions';
 
 app.use(express.json({ limit: '50mb' }));
 
-// 文生图
 app.post('/api/generate', async (req, res) => {
-  const { prompt, apiKey, model = 'gemini-3.0-pro-image-portrait' } = req.body;
+  const { prompt, apiKey, model = 'gemini-3.0-pro-image-landscape' } = req.body;
 
   const messages = [
     {
@@ -356,7 +401,6 @@ app.post('/api/generate', async (req, res) => {
   const rawText = await response.text();
   const imageUrl = extractImageUrl(rawText);
 
-  // 下载图片并转为 Base64
   const imageResponse = await fetch(imageUrl);
   const buffer = Buffer.from(await imageResponse.arrayBuffer());
   const base64 = `data:image/png;base64,${buffer.toString('base64')}`;
@@ -364,7 +408,6 @@ app.post('/api/generate', async (req, res) => {
   res.json({ success: true, imageBase64: base64, imageUrl });
 });
 
-// 图生图
 app.post('/api/edit', async (req, res) => {
   const { prompt, apiKey, model, mainImageBase64, referenceImagesBase64 } = req.body;
 
@@ -410,6 +453,7 @@ app.listen(3000);
 3. **CORS 限制**：返回的图片 URL 需要通过后端代理访问
 4. **图片大小**：建议限制上传图片大小在 20MB 以内
 5. **参考图片数量**：图生图最多支持 5 张参考图片
+6. **Flash 模型限制**：Gemini 2.5 Flash 仅支持 portrait 和 landscape 两种比例
 
 ---
 
@@ -419,3 +463,4 @@ app.listen(3000);
 - 项目目录：`nano-image-generator/`
 - 前端 API 封装：`public/js/api.js`
 - 后端服务器：`server.js`
+- GitHub 仓库：`https://github.com/yszxh/nano-image-generator`

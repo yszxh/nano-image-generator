@@ -1,22 +1,88 @@
 document.addEventListener('DOMContentLoaded', () => {
+  const MODEL_CONFIG = {
+    ratios: {
+      'portrait': { suffix: 'portrait', flash: true, pro: true },
+      'landscape': { suffix: 'landscape', flash: true, pro: true },
+      'square': { suffix: 'square', flash: false, pro: true },
+      'four-three': { suffix: 'four-three', flash: false, pro: true },
+      'three-four': { suffix: 'three-four', flash: false, pro: true }
+    },
+    versions: {
+      'gemini-2.5-flash': { prefix: 'gemini-2.5-flash-image', suffix: '', type: 'flash' },
+      'gemini-3.0-pro': { prefix: 'gemini-3.0-pro-image', suffix: '', type: 'pro' },
+      'gemini-3.0-pro-2k': { prefix: 'gemini-3.0-pro-image', suffix: '-2k', type: 'pro' },
+      'gemini-3.0-pro-4k': { prefix: 'gemini-3.0-pro-image', suffix: '-4k', type: 'pro' }
+    }
+  };
+
   const state = {
     currentTab: 'text2img',
     mainImage: null,
     referenceImages: [],
     lastGeneratedImage: null,
     apiKey: localStorage.getItem('nano_api_key') || '',
-    model: localStorage.getItem('nano_model') || 'gemini-3.0-pro-image-portrait',
+    ratio: localStorage.getItem('nano_ratio') || 'landscape',
+    modelVersion: localStorage.getItem('nano_model_version') || 'gemini-3.0-pro',
     theme: localStorage.getItem('nano_theme') || 'dark'
   };
+
+  function buildModelName() {
+    const versionConfig = MODEL_CONFIG.versions[state.modelVersion];
+    const ratioConfig = MODEL_CONFIG.ratios[state.ratio];
+    
+    if (!versionConfig || !ratioConfig) {
+      return 'gemini-3.0-pro-image-landscape';
+    }
+    
+    return `${versionConfig.prefix}-${ratioConfig.suffix}${versionConfig.suffix}`;
+  }
+
+  function getModel() {
+    return buildModelName();
+  }
+
+  function updateModelHint() {
+    const hintEl = document.getElementById('modelHint');
+    if (hintEl) {
+      hintEl.textContent = `当前模型：${getModel()}`;
+    }
+  }
+
+  function updateVersionOptions() {
+    const versionSelect = document.getElementById('modelVersionSelect');
+    const ratioConfig = MODEL_CONFIG.ratios[state.ratio];
+    
+    if (!versionSelect || !ratioConfig) return;
+    
+    Array.from(versionSelect.options).forEach(option => {
+      const version = option.value;
+      const versionConfig = MODEL_CONFIG.versions[version];
+      
+      let isSupported = true;
+      if (versionConfig && versionConfig.type === 'flash' && !ratioConfig.flash) {
+        isSupported = false;
+      }
+      
+      option.disabled = !isSupported;
+      
+      if (!isSupported && versionSelect.value === version) {
+        versionSelect.value = 'gemini-3.0-pro';
+        state.modelVersion = 'gemini-3.0-pro';
+        localStorage.setItem('nano_model_version', state.modelVersion);
+      }
+    });
+  }
 
   initTheme();
   initTabs();
   initRatioSelector();
+  initModelVersionSelector();
   initTemplates();
   initUpload();
   initModals();
   initActions();
   renderHistory();
+  updateModelHint();
 
   function initTheme() {
     document.documentElement.setAttribute('data-theme', state.theme);
@@ -56,10 +122,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function initRatioSelector() {
     const ratioCards = document.querySelectorAll('.ratio-card');
-    const currentRatio = state.model.includes('landscape') ? 'landscape' : 'portrait';
     
     ratioCards.forEach(card => {
-      if (card.dataset.ratio === currentRatio) {
+      if (card.dataset.ratio === state.ratio) {
         card.classList.add('active');
       } else {
         card.classList.remove('active');
@@ -69,27 +134,28 @@ document.addEventListener('DOMContentLoaded', () => {
         ratioCards.forEach(c => c.classList.remove('active'));
         card.classList.add('active');
         
-        state.model = card.dataset.model;
-        localStorage.setItem('nano_model', state.model);
+        state.ratio = card.dataset.ratio;
+        localStorage.setItem('nano_ratio', state.ratio);
         
-        const modelSelect = document.getElementById('modelSelect');
-        if (modelSelect) {
-          modelSelect.value = state.model;
-        }
+        updateVersionOptions();
+        updateModelHint();
       });
     });
+    
+    updateVersionOptions();
   }
 
-  function updateRatioSelector() {
-    const ratioCards = document.querySelectorAll('.ratio-card');
-    const currentRatio = state.model.includes('landscape') ? 'landscape' : 'portrait';
+  function initModelVersionSelector() {
+    const versionSelect = document.getElementById('modelVersionSelect');
     
-    ratioCards.forEach(card => {
-      if (card.dataset.ratio === currentRatio) {
-        card.classList.add('active');
-      } else {
-        card.classList.remove('active');
-      }
+    if (!versionSelect) return;
+    
+    versionSelect.value = state.modelVersion;
+    
+    versionSelect.addEventListener('change', () => {
+      state.modelVersion = versionSelect.value;
+      localStorage.setItem('nano_model_version', state.modelVersion);
+      updateModelHint();
     });
   }
 
@@ -208,12 +274,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeSettingsBtn = document.getElementById('closeSettingsBtn');
     const saveSettingsBtn = document.getElementById('saveSettingsBtn');
     const apiKeyInput = document.getElementById('apiKeyInput');
-    const modelSelect = document.getElementById('modelSelect');
     const toggleApiKeyVisibility = document.getElementById('toggleApiKeyVisibility');
 
     settingsBtn.addEventListener('click', () => {
       apiKeyInput.value = state.apiKey;
-      modelSelect.value = state.model;
       UI.showModal('settingsModal');
     });
 
@@ -228,11 +292,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     saveSettingsBtn.addEventListener('click', () => {
       state.apiKey = apiKeyInput.value.trim();
-      state.model = modelSelect.value;
       localStorage.setItem('nano_api_key', state.apiKey);
-      localStorage.setItem('nano_model', state.model);
-      
-      updateRatioSelector();
       
       UI.hideModal('settingsModal');
       UI.showToast('设置已保存', 'success');
@@ -312,7 +372,8 @@ document.addEventListener('DOMContentLoaded', () => {
     showProgressResult();
 
     try {
-      const result = await ImageAPI.generateImage(prompt, state.apiKey, state.model, updateProgress);
+      const model = getModel();
+      const result = await ImageAPI.generateImage(prompt, state.apiKey, model, updateProgress);
       state.lastGeneratedImage = result;
       
       HistoryManager.add({
@@ -357,10 +418,11 @@ document.addEventListener('DOMContentLoaded', () => {
     showProgressResult();
 
     try {
+      const model = getModel();
       const result = await ImageAPI.editImage({
         prompt,
         apiKey: state.apiKey,
-        model: state.model,
+        model,
         mainImageBase64: state.mainImage,
         referenceImagesBase64: state.referenceImages.length > 0 ? state.referenceImages : undefined,
         onProgress: updateProgress
@@ -420,10 +482,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function getSkeletonClass() {
+    const ratioMap = {
+      'portrait': 'skeleton-portrait',
+      'landscape': 'skeleton-landscape',
+      'square': 'skeleton-square',
+      'four-three': 'skeleton-four-three',
+      'three-four': 'skeleton-three-four'
+    };
+    return ratioMap[state.ratio] || 'skeleton-landscape';
+  }
+
   function showProgressResult() {
     const resultContent = document.getElementById('resultContent');
-    const isLandscape = state.model.includes('landscape');
-    const skeletonClass = isLandscape ? 'skeleton-landscape' : 'skeleton-portrait';
+    const skeletonClass = getSkeletonClass();
     
     resultContent.innerHTML = `
       <div class="generation-progress">
