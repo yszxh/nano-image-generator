@@ -23,7 +23,12 @@ document.addEventListener('DOMContentLoaded', () => {
     apiKey: localStorage.getItem('nano_api_key') || '',
     ratio: localStorage.getItem('nano_ratio') || 'landscape',
     modelVersion: localStorage.getItem('nano_model_version') || 'gemini-3.0-pro',
-    theme: localStorage.getItem('nano_theme') || 'dark'
+    theme: localStorage.getItem('nano_theme') || 'dark',
+    videoRatio: localStorage.getItem('nano_video_ratio') || 'landscape',
+    startFrame: null,
+    endFrame: null,
+    lastGeneratedVideo: null,
+    lastVideoBlobUrl: null
   };
 
   function buildModelName() {
@@ -77,8 +82,10 @@ document.addEventListener('DOMContentLoaded', () => {
   initTabs();
   initRatioSelector();
   initModelVersionSelector();
+  initVideoRatioSelector();
   initTemplates();
   initUpload();
+  initFrameUpload();
   initModals();
   initActions();
   renderHistory();
@@ -104,6 +111,16 @@ document.addEventListener('DOMContentLoaded', () => {
   function initTabs() {
     const tabBtns = document.querySelectorAll('.tab-btn');
     const panels = document.querySelectorAll('.tab-panel');
+    const imageSettings = document.querySelectorAll('.image-settings');
+
+    function updateImageSettingsVisibility(tab) {
+      const isVideoTab = tab === 'text2video' || tab === 'frame2video';
+      imageSettings.forEach(el => {
+        el.style.display = isVideoTab ? 'none' : 'block';
+      });
+    }
+
+    updateImageSettingsVisibility(state.currentTab);
 
     tabBtns.forEach(btn => {
       btn.addEventListener('click', () => {
@@ -116,6 +133,8 @@ document.addEventListener('DOMContentLoaded', () => {
         panels.forEach(p => {
           p.classList.toggle('active', p.id === `${tab}Panel`);
         });
+
+        updateImageSettingsVisibility(tab);
       });
     });
   }
@@ -159,8 +178,34 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function initVideoRatioSelector() {
+    const videoRatioCards = document.querySelectorAll('.video-ratio-selector:not(.frame-video-ratio) .video-ratio-card');
+    const frameVideoRatioCards = document.querySelectorAll('.frame-video-ratio .video-ratio-card');
+    
+    const initCards = (cards) => {
+      cards.forEach(card => {
+        if (card.dataset.ratio === state.videoRatio) {
+          card.classList.add('active');
+        } else {
+          card.classList.remove('active');
+        }
+        
+        card.addEventListener('click', () => {
+          cards.forEach(c => c.classList.remove('active'));
+          card.classList.add('active');
+          
+          state.videoRatio = card.dataset.ratio;
+          localStorage.setItem('nano_video_ratio', state.videoRatio);
+        });
+      });
+    };
+    
+    initCards(videoRatioCards);
+    initCards(frameVideoRatioCards);
+  }
+
   function initTemplates() {
-    const templateTags = document.querySelectorAll('.template-tag');
+    const templateTags = document.querySelectorAll('.template-tag:not(.video-template)');
     const promptInput = document.getElementById('promptInput');
 
     templateTags.forEach(tag => {
@@ -174,6 +219,23 @@ document.addEventListener('DOMContentLoaded', () => {
           promptInput.value = template;
         }
         promptInput.focus();
+      });
+    });
+
+    const videoTemplateTags = document.querySelectorAll('.video-template');
+    const videoPromptInput = document.getElementById('videoPromptInput');
+
+    videoTemplateTags.forEach(tag => {
+      tag.addEventListener('click', () => {
+        const template = tag.dataset.template;
+        const currentText = videoPromptInput.value.trim();
+        
+        if (currentText) {
+          videoPromptInput.value = `${currentText}, ${template}`;
+        } else {
+          videoPromptInput.value = template;
+        }
+        videoPromptInput.focus();
       });
     });
   }
@@ -238,6 +300,92 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       });
     }
+  }
+
+  function initFrameUpload() {
+    const startFrameZone = document.getElementById('startFrameZone');
+    const startFrameInput = document.getElementById('startFrameInput');
+    const startFramePreview = document.getElementById('startFramePreview');
+    const removeStartFrame = document.getElementById('removeStartFrame');
+
+    const endFrameZone = document.getElementById('endFrameZone');
+    const endFrameInput = document.getElementById('endFrameInput');
+    const endFramePreview = document.getElementById('endFramePreview');
+    const removeEndFrame = document.getElementById('removeEndFrame');
+
+    if (!startFrameZone) return;
+
+    setupFrameDropZone(startFrameZone, startFrameInput, startFramePreview, removeStartFrame, 'startFrame');
+    setupFrameDropZone(endFrameZone, endFrameInput, endFramePreview, removeEndFrame, 'endFrame');
+
+    removeStartFrame.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.startFrame = null;
+      startFramePreview.classList.add('hidden');
+      startFramePreview.src = '';
+      startFrameZone.querySelector('.upload-placeholder').classList.remove('hidden');
+      removeStartFrame.classList.add('hidden');
+      startFrameInput.value = '';
+    });
+
+    removeEndFrame.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.endFrame = null;
+      endFramePreview.classList.add('hidden');
+      endFramePreview.src = '';
+      endFrameZone.querySelector('.upload-placeholder').classList.remove('hidden');
+      removeEndFrame.classList.add('hidden');
+      endFrameInput.value = '';
+    });
+  }
+
+  function setupFrameDropZone(zone, input, preview, removeBtn, stateKey) {
+    zone.addEventListener('click', () => input.click());
+    
+    input.addEventListener('change', async (e) => {
+      if (e.target.files.length > 0) {
+        const file = e.target.files[0];
+        const base64 = await UI.fileToBase64(file);
+        setFrameImage(zone, preview, removeBtn, stateKey, base64);
+      }
+    });
+
+    zone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      zone.classList.add('dragover');
+    });
+
+    zone.addEventListener('dragleave', () => {
+      zone.classList.remove('dragover');
+    });
+
+    zone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      zone.classList.remove('dragover');
+      
+      const historyId = e.dataTransfer.getData('application/x-history-image');
+      if (historyId) {
+        const item = HistoryManager.getById(historyId);
+        if (item && item.imageBase64) {
+          setFrameImage(zone, preview, removeBtn, stateKey, item.imageBase64);
+          return;
+        }
+      }
+      
+      const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/'));
+      if (files.length > 0) {
+        const base64 = await UI.fileToBase64(files[0]);
+        setFrameImage(zone, preview, removeBtn, stateKey, base64);
+      }
+    });
+  }
+
+  function setFrameImage(zone, preview, removeBtn, stateKey, base64) {
+    state[stateKey] = base64;
+    preview.src = base64;
+    preview.classList.remove('hidden');
+    zone.querySelector('.upload-placeholder').classList.add('hidden');
+    removeBtn.classList.remove('hidden');
   }
 
   function setupDropZone(zone, input, onFiles) {
@@ -339,12 +487,39 @@ document.addEventListener('DOMContentLoaded', () => {
     const downloadBtn = document.getElementById('downloadBtn');
     const continueEditBtn = document.getElementById('continueEditBtn');
     const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+    const generateVideoBtn = document.getElementById('generateVideoBtn');
+    const generateFrameVideoBtn = document.getElementById('generateFrameVideoBtn');
+    const generateVideoFromImageBtn = document.getElementById('generateVideoFromImageBtn');
+    const modalGenerateVideoBtn = document.getElementById('modalGenerateVideoBtn');
 
     generateBtn.addEventListener('click', handleGenerate);
     editBtn.addEventListener('click', handleEdit);
     downloadBtn.addEventListener('click', handleDownload);
     continueEditBtn.addEventListener('click', handleContinueEdit);
     clearHistoryBtn.addEventListener('click', handleClearHistory);
+    
+    if (generateVideoBtn) {
+      generateVideoBtn.addEventListener('click', handleGenerateVideo);
+    }
+    if (generateFrameVideoBtn) {
+      generateFrameVideoBtn.addEventListener('click', handleGenerateVideoFromFrames);
+    }
+    if (generateVideoFromImageBtn) {
+      generateVideoFromImageBtn.addEventListener('click', () => {
+        if (state.lastGeneratedImage?.imageBase64) {
+          loadImageToStartFrame(state.lastGeneratedImage.imageBase64);
+        }
+      });
+    }
+    if (modalGenerateVideoBtn) {
+      modalGenerateVideoBtn.addEventListener('click', () => {
+        const modalImage = document.getElementById('modalImage');
+        if (modalImage.src) {
+          UI.hideModal('imageModal');
+          loadImageToStartFrame(modalImage.src);
+        }
+      });
+    }
 
     document.getElementById('resultContent').addEventListener('click', (e) => {
       if (e.target.classList.contains('result-image')) {
@@ -449,8 +624,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function handleDownload() {
-    if (state.lastGeneratedImage?.imageBase64) {
+  async function handleDownload() {
+    if (state.lastVideoBlobUrl) {
+      const a = document.createElement('a');
+      a.href = state.lastVideoBlobUrl;
+      a.download = `nano-video-${Date.now()}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      UI.showToast('下载开始', 'success');
+    } else if (state.lastGeneratedVideo?.videoUrl) {
+      UI.showToast('正在下载视频...', 'info');
+      try {
+        const response = await fetch('/api/proxy-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: state.lastGeneratedVideo.videoUrl })
+        });
+        if (!response.ok) throw new Error('下载失败');
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `nano-video-${Date.now()}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+        UI.showToast('下载完成', 'success');
+      } catch (error) {
+        UI.showToast('视频下载失败: ' + error.message, 'error');
+      }
+    } else if (state.lastGeneratedImage?.imageBase64) {
       UI.downloadImage(state.lastGeneratedImage.imageBase64, `nano-image-${Date.now()}.png`);
       UI.showToast('下载开始', 'success');
     }
@@ -480,6 +685,266 @@ document.addEventListener('DOMContentLoaded', () => {
       renderHistory();
       UI.showToast('历史记录已清空', 'success');
     }
+  }
+
+  async function handleGenerateVideo() {
+    const prompt = document.getElementById('videoPromptInput').value.trim();
+    
+    if (!prompt) {
+      UI.showToast('请输入视频描述', 'warning');
+      return;
+    }
+
+    if (!state.apiKey) {
+      UI.showToast('请先配置 API Key', 'warning');
+      document.getElementById('settingsBtn').click();
+      return;
+    }
+
+    UI.setLoading('generateVideoBtn', true);
+    showVideoProgressResult();
+
+    try {
+      const result = await ImageAPI.generateVideo(prompt, state.apiKey, state.videoRatio, updateProgress);
+      state.lastGeneratedVideo = result;
+      state.lastGeneratedImage = null;
+      
+      HistoryManager.add({
+        id: result.id,
+        prompt: result.prompt,
+        videoUrl: result.videoUrl,
+        type: 'video',
+        mediaType: 'video',
+        createdAt: result.createdAt
+      });
+
+      showVideoResult(result);
+      renderHistory();
+      UI.showToast('视频生成成功！', 'success');
+    } catch (error) {
+      UI.showToast(error.message || '生成失败，请重试', 'error');
+      hideLoadingResult();
+    } finally {
+      UI.setLoading('generateVideoBtn', false);
+    }
+  }
+
+  async function handleGenerateVideoFromFrames() {
+    const prompt = document.getElementById('frameVideoPromptInput').value.trim();
+    
+    if (!prompt) {
+      UI.showToast('请输入视频描述', 'warning');
+      return;
+    }
+
+    if (!state.startFrame) {
+      UI.showToast('请上传首帧图片', 'warning');
+      return;
+    }
+
+    if (!state.apiKey) {
+      UI.showToast('请先配置 API Key', 'warning');
+      document.getElementById('settingsBtn').click();
+      return;
+    }
+
+    UI.setLoading('generateFrameVideoBtn', true);
+    showVideoProgressResult();
+
+    try {
+      const result = await ImageAPI.generateVideoFromFrames({
+        prompt,
+        apiKey: state.apiKey,
+        ratio: state.videoRatio,
+        startFrameBase64: state.startFrame,
+        endFrameBase64: state.endFrame,
+        onProgress: updateProgress
+      });
+      
+      state.lastGeneratedVideo = result;
+      state.lastGeneratedImage = null;
+      
+      HistoryManager.add({
+        id: result.id,
+        prompt: result.prompt,
+        videoUrl: result.videoUrl,
+        type: 'video-frames',
+        mediaType: 'video',
+        createdAt: result.createdAt
+      });
+
+      showVideoResult(result);
+      renderHistory();
+      UI.showToast('视频生成成功！', 'success');
+    } catch (error) {
+      UI.showToast(error.message || '生成失败，请重试', 'error');
+      hideLoadingResult();
+    } finally {
+      UI.setLoading('generateFrameVideoBtn', false);
+    }
+  }
+
+  async function startImageToVideo(imageBase64, prompt = '') {
+    if (!state.apiKey) {
+      UI.showToast('请先配置 API Key', 'warning');
+      document.getElementById('settingsBtn').click();
+      return;
+    }
+
+    const videoPrompt = prompt || '将这张图片转换为动态视频，添加自然的运动效果';
+    
+    showVideoProgressResult();
+
+    try {
+      const result = await ImageAPI.generateVideoFromFrames({
+        prompt: videoPrompt,
+        apiKey: state.apiKey,
+        ratio: state.videoRatio,
+        startFrameBase64: imageBase64,
+        endFrameBase64: null,
+        onProgress: updateProgress
+      });
+      
+      state.lastGeneratedVideo = result;
+      state.lastGeneratedImage = null;
+      
+      HistoryManager.add({
+        id: result.id,
+        prompt: result.prompt,
+        videoUrl: result.videoUrl,
+        type: 'image-to-video',
+        mediaType: 'video',
+        createdAt: result.createdAt
+      });
+
+      showVideoResult(result);
+      renderHistory();
+      UI.showToast('视频生成成功！', 'success');
+    } catch (error) {
+      UI.showToast(error.message || '生成失败，请重试', 'error');
+      hideLoadingResult();
+    }
+  }
+
+  function loadImageToStartFrame(imageBase64) {
+    state.startFrame = imageBase64;
+    
+    const startFramePreview = document.getElementById('startFramePreview');
+    const startFrameZone = document.getElementById('startFrameZone');
+    const removeStartFrame = document.getElementById('removeStartFrame');
+    
+    if (startFramePreview && startFrameZone && removeStartFrame) {
+      startFramePreview.src = imageBase64;
+      startFramePreview.classList.remove('hidden');
+      startFrameZone.querySelector('.upload-placeholder').classList.add('hidden');
+      removeStartFrame.classList.remove('hidden');
+    }
+    
+    document.querySelector('[data-tab="frame2video"]').click();
+    UI.showToast('已加载图片到首帧，请输入视频描述', 'success');
+  }
+
+  function showVideoProgressResult() {
+    const resultContent = document.getElementById('resultContent');
+    const skeletonClass = state.videoRatio === 'portrait' ? 'skeleton-portrait' : 'skeleton-landscape';
+    
+    resultContent.innerHTML = `
+      <div class="generation-progress">
+        <div class="skeleton-image ${skeletonClass}">
+          <span class="skeleton-video-icon">🎬</span>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+          </div>
+          <div class="progress-info">
+            <span class="progress-stage" id="progressStage">准备中...</span>
+            <span class="progress-percent" id="progressPercent">0%</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async function showVideoResult(result) {
+    const resultContent = document.getElementById('resultContent');
+    const resultActions = document.getElementById('resultActions');
+    const resultInfo = document.getElementById('resultInfo');
+    const resultPrompt = document.getElementById('resultPrompt');
+    const resultTime = document.getElementById('resultTime');
+    const continueEditBtn = document.getElementById('continueEditBtn');
+
+    const videoUrl = result.videoUrl ? result.videoUrl.replace(/['"\\s]+$/, '') : null;
+
+    if (!videoUrl) {
+      resultContent.innerHTML = `
+        <div class="result-placeholder">
+          <span class="placeholder-icon">❌</span>
+          <p>视频 URL 无效</p>
+        </div>
+      `;
+      resultActions.classList.remove('hidden');
+      continueEditBtn.classList.add('hidden');
+      resultInfo.classList.remove('hidden');
+      resultPrompt.textContent = result.prompt || '';
+      resultTime.textContent = UI.formatDate(result.createdAt);
+      return;
+    }
+
+    resultContent.innerHTML = `
+      <div class="generation-progress">
+        <div class="skeleton-image skeleton-landscape">
+          <span class="skeleton-video-icon">🎬</span>
+        </div>
+        <div class="progress-container">
+          <div class="progress-info">
+            <span class="progress-stage">加载视频中...</span>
+          </div>
+        </div>
+      </div>
+    `;
+
+    try {
+      const response = await fetch('/api/proxy-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: videoUrl })
+      });
+
+      if (!response.ok) {
+        throw new Error('视频加载失败');
+      }
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      
+      state.lastVideoBlobUrl = blobUrl;
+
+      resultContent.innerHTML = `
+        <video class="result-video" controls autoplay loop>
+          <source src="${blobUrl}" type="video/mp4">
+          您的浏览器不支持视频播放
+        </video>
+      `;
+    } catch (error) {
+      console.error('Video load error:', error);
+      resultContent.innerHTML = `
+        <div class="result-placeholder">
+          <span class="placeholder-icon">❌</span>
+          <p>视频加载失败: ${error.message}</p>
+        </div>
+      `;
+    }
+    
+    resultActions.classList.remove('hidden');
+    continueEditBtn.classList.add('hidden');
+    const generateVideoFromImageBtn = document.getElementById('generateVideoFromImageBtn');
+    if (generateVideoFromImageBtn) {
+      generateVideoFromImageBtn.classList.add('hidden');
+    }
+    resultInfo.classList.remove('hidden');
+    resultPrompt.textContent = result.prompt;
+    resultTime.textContent = UI.formatDate(result.createdAt);
   }
 
   function getSkeletonClass() {
@@ -539,12 +1004,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const resultInfo = document.getElementById('resultInfo');
     const resultPrompt = document.getElementById('resultPrompt');
     const resultTime = document.getElementById('resultTime');
+    const continueEditBtn = document.getElementById('continueEditBtn');
+    const generateVideoFromImageBtn = document.getElementById('generateVideoFromImageBtn');
 
     resultContent.innerHTML = `<img class="result-image" src="${result.imageBase64}" alt="生成的图片">`;
     resultActions.classList.remove('hidden');
+    continueEditBtn.classList.remove('hidden');
+    if (generateVideoFromImageBtn) {
+      generateVideoFromImageBtn.classList.remove('hidden');
+    }
     resultInfo.classList.remove('hidden');
     resultPrompt.textContent = result.prompt;
     resultTime.textContent = UI.formatDate(result.createdAt);
+    
+    state.lastGeneratedVideo = null;
   }
 
   function renderHistory() {
@@ -560,26 +1033,82 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    historyGrid.innerHTML = history.map(item => `
-      <div class="history-item" data-id="${item.id}">
-        <img src="${item.imageBase64}" alt="${UI.truncateText(item.prompt, 20)}">
-        <div class="history-item-overlay">
-          <div class="history-item-actions">
-            <button class="history-view-btn" data-id="${item.id}">查看</button>
-            <button class="history-edit-btn" data-id="${item.id}">编辑</button>
+    historyGrid.innerHTML = history.map(item => {
+      const isVideo = item.mediaType === 'video';
+      if (isVideo) {
+        return `
+          <div class="history-item history-item-video" data-id="${item.id}">
+            <div class="history-video-thumb">
+              <span class="video-icon">🎬</span>
+            </div>
+            <div class="history-item-overlay">
+              <div class="history-item-actions">
+                <button class="history-view-btn" data-id="${item.id}">播放</button>
+                <button class="history-download-btn" data-id="${item.id}">下载</button>
+              </div>
+            </div>
+            <button class="history-item-delete" data-id="${item.id}">✕</button>
           </div>
+        `;
+      }
+      return `
+        <div class="history-item" data-id="${item.id}" draggable="true">
+          <img src="${item.imageBase64}" alt="${UI.truncateText(item.prompt, 20)}">
+          <div class="history-item-overlay">
+            <div class="history-item-actions">
+              <button class="history-view-btn" data-id="${item.id}">查看</button>
+              <button class="history-edit-btn" data-id="${item.id}">编辑</button>
+              <button class="history-video-btn" data-id="${item.id}">视频</button>
+            </div>
+          </div>
+          <button class="history-item-delete" data-id="${item.id}">✕</button>
         </div>
-        <button class="history-item-delete" data-id="${item.id}">✕</button>
-      </div>
-    `).join('');
+      `;
+    }).join('');
 
     historyGrid.querySelectorAll('.history-view-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const item = HistoryManager.getById(btn.dataset.id);
         if (item) {
-          document.getElementById('modalImage').src = item.imageBase64;
-          UI.showModal('imageModal');
+          if (item.mediaType === 'video') {
+            state.lastGeneratedVideo = { videoUrl: item.videoUrl, prompt: item.prompt, createdAt: item.createdAt };
+            state.lastGeneratedImage = null;
+            showVideoResult(state.lastGeneratedVideo);
+          } else {
+            document.getElementById('modalImage').src = item.imageBase64;
+            UI.showModal('imageModal');
+          }
+        }
+      });
+    });
+
+    historyGrid.querySelectorAll('.history-download-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const item = HistoryManager.getById(btn.dataset.id);
+        if (item && item.videoUrl) {
+          UI.showToast('正在下载视频...', 'info');
+          try {
+            const response = await fetch('/api/proxy-video', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: item.videoUrl })
+            });
+            if (!response.ok) throw new Error('下载失败');
+            const blob = await response.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = `nano-video-${Date.now()}.mp4`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+            UI.showToast('下载完成', 'success');
+          } catch (error) {
+            UI.showToast('视频下载失败: ' + error.message, 'error');
+          }
         }
       });
     });
@@ -588,7 +1117,7 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const item = HistoryManager.getById(btn.dataset.id);
-        if (item) {
+        if (item && item.imageBase64) {
           state.mainImage = item.imageBase64;
           
           const mainImagePreview = document.getElementById('mainImagePreview');
@@ -606,6 +1135,16 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
 
+    historyGrid.querySelectorAll('.history-video-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const item = HistoryManager.getById(btn.dataset.id);
+        if (item && item.imageBase64) {
+          loadImageToStartFrame(item.imageBase64);
+        }
+      });
+    });
+
     historyGrid.querySelectorAll('.history-item-delete').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -619,9 +1158,28 @@ document.addEventListener('DOMContentLoaded', () => {
       item.addEventListener('click', () => {
         const historyItem = HistoryManager.getById(item.dataset.id);
         if (historyItem) {
-          document.getElementById('modalImage').src = historyItem.imageBase64;
-          UI.showModal('imageModal');
+          if (historyItem.mediaType === 'video') {
+            state.lastGeneratedVideo = { videoUrl: historyItem.videoUrl, prompt: historyItem.prompt, createdAt: historyItem.createdAt };
+            state.lastGeneratedImage = null;
+            showVideoResult(state.lastGeneratedVideo);
+          } else {
+            document.getElementById('modalImage').src = historyItem.imageBase64;
+            UI.showModal('imageModal');
+          }
         }
+      });
+
+      item.addEventListener('dragstart', (e) => {
+        const historyItem = HistoryManager.getById(item.dataset.id);
+        if (historyItem && historyItem.imageBase64) {
+          e.dataTransfer.setData('text/plain', historyItem.imageBase64);
+          e.dataTransfer.setData('application/x-history-image', historyItem.id);
+          item.classList.add('dragging');
+        }
+      });
+
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
       });
     });
   }

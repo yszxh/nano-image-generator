@@ -17,8 +17,10 @@ const HistoryManager = {
     const newItem = {
       id: item.id || Date.now().toString(),
       prompt: item.prompt,
-      imageBase64: item.imageBase64,
+      imageBase64: item.imageBase64 || null,
+      videoUrl: item.videoUrl || null,
       type: item.type || 'generate',
+      mediaType: item.mediaType || 'image',
       createdAt: item.createdAt || new Date().toISOString()
     };
     

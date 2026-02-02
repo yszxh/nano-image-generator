@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NANO 图像生成器</title>
+  <title>NANO 图像/视频生成器</title>
   <link rel="stylesheet" href="css/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎨</text></svg>">
 </head>
@@ -11,7 +11,7 @@
   <div class="app-container">
     <header class="header">
       <div class="header-left">
-        <h1 class="logo">🎨 NANO 图像生成器</h1>
+        <h1 class="logo">🎨 NANO 图像/视频生成器</h1>
       </div>
       <div class="header-right">
         <button id="themeToggle" class="btn btn-icon" title="切换主题">
@@ -27,11 +27,13 @@
       <div class="tabs">
         <button class="tab-btn active" data-tab="text2img">📝 文生图</button>
         <button class="tab-btn" data-tab="img2img">🖼️ 图生图</button>
+        <button class="tab-btn" data-tab="text2video">🎬 文生视频</button>
+        <button class="tab-btn" data-tab="frame2video">🎥 图生视频</button>
       </div>
 
       <div class="content-wrapper">
         <div class="input-panel">
-          <div class="form-group">
+          <div class="form-group image-settings" id="imageRatioGroup">
             <label>图片比例</label>
             <div class="ratio-selector">
               <div class="ratio-card" data-ratio="portrait" title="竖屏 9:16">
@@ -82,7 +84,7 @@
             </div>
           </div>
 
-          <div class="form-group">
+          <div class="form-group image-settings" id="modelVersionGroup">
             <label for="modelVersionSelect">模型版本</label>
             <select id="modelVersionSelect" class="input">
               <option value="gemini-2.5-flash">Gemini 2.5 Flash（快速）</option>
@@ -168,6 +170,126 @@
               <span class="btn-loading hidden">⏳ 处理中...</span>
             </button>
           </div>
+
+          <div id="text2videoPanel" class="tab-panel">
+            <div class="form-group">
+              <label>视频比例</label>
+              <div class="video-ratio-selector">
+                <div class="video-ratio-card" data-ratio="portrait" title="竖屏 9:16">
+                  <div class="ratio-preview-wrapper">
+                    <div class="ratio-preview ratio-portrait"></div>
+                  </div>
+                  <div class="ratio-label">
+                    <span class="ratio-name">竖屏</span>
+                    <span class="ratio-sub">9:16</span>
+                  </div>
+                </div>
+                <div class="video-ratio-card active" data-ratio="landscape" title="横屏 16:9">
+                  <div class="ratio-preview-wrapper">
+                    <div class="ratio-preview ratio-landscape"></div>
+                  </div>
+                  <div class="ratio-label">
+                    <span class="ratio-name">横屏</span>
+                    <span class="ratio-sub">16:9</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="videoPromptInput">视频描述</label>
+              <textarea 
+                id="videoPromptInput" 
+                class="prompt-input" 
+                placeholder="描述你想要生成的视频，例如：一只金色柴犬在草地上奔跑，阳光明媚，慢动作特写..."
+                rows="4"
+              ></textarea>
+            </div>
+            
+            <div class="form-group">
+              <label>快捷模板</label>
+              <div class="template-tags">
+                <button class="template-tag video-template" data-template="cinematic, professional lighting, smooth camera movement, high quality, 4K">🎬 电影感</button>
+                <button class="template-tag video-template" data-template="slow motion, dramatic, epic scene, detailed">🐢 慢动作</button>
+                <button class="template-tag video-template" data-template="timelapse, fast motion, dynamic, energetic">⚡ 延时摄影</button>
+                <button class="template-tag video-template" data-template="aerial view, drone shot, panoramic, sweeping">🚁 航拍</button>
+                <button class="template-tag video-template" data-template="close-up, macro, detailed, intimate">🔍 特写</button>
+                <button class="template-tag video-template" data-template="anime style, vibrant colors, Japanese animation">🎌 动漫风</button>
+              </div>
+            </div>
+
+            <button id="generateVideoBtn" class="btn btn-primary btn-large">
+              <span class="btn-text">🎬 生成视频</span>
+              <span class="btn-loading hidden">⏳ 生成中...</span>
+            </button>
+          </div>
+
+          <div id="frame2videoPanel" class="tab-panel">
+            <div class="form-group">
+              <label>视频比例</label>
+              <div class="video-ratio-selector frame-video-ratio">
+                <div class="video-ratio-card" data-ratio="portrait" title="竖屏 9:16">
+                  <div class="ratio-preview-wrapper">
+                    <div class="ratio-preview ratio-portrait"></div>
+                  </div>
+                  <div class="ratio-label">
+                    <span class="ratio-name">竖屏</span>
+                    <span class="ratio-sub">9:16</span>
+                  </div>
+                </div>
+                <div class="video-ratio-card active" data-ratio="landscape" title="横屏 16:9">
+                  <div class="ratio-preview-wrapper">
+                    <div class="ratio-preview ratio-landscape"></div>
+                  </div>
+                  <div class="ratio-label">
+                    <span class="ratio-name">横屏</span>
+                    <span class="ratio-sub">16:9</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="frameVideoPromptInput">视频描述</label>
+              <textarea 
+                id="frameVideoPromptInput" 
+                class="prompt-input" 
+                placeholder="描述视频中的动作和变化，例如：镜头缓缓推进，花朵逐渐绽放..."
+                rows="3"
+              ></textarea>
+            </div>
+
+            <div class="form-group">
+              <label>首尾帧图片</label>
+              <div class="frame-upload-container">
+                <div class="frame-upload-zone" id="startFrameZone">
+                  <div class="upload-placeholder">
+                    <span class="upload-icon">🖼️</span>
+                    <p class="frame-label">首帧 <span class="required">*</span></p>
+                    <p class="frame-hint">视频开始画面</p>
+                  </div>
+                  <img class="frame-preview hidden" id="startFramePreview" alt="首帧预览">
+                  <button class="btn-remove hidden" id="removeStartFrame">✕</button>
+                  <input type="file" id="startFrameInput" accept="image/*" hidden>
+                </div>
+                <div class="frame-upload-zone" id="endFrameZone">
+                  <div class="upload-placeholder">
+                    <span class="upload-icon">🖼️</span>
+                    <p class="frame-label">尾帧 <span class="optional">(可选)</span></p>
+                    <p class="frame-hint">视频结束画面</p>
+                  </div>
+                  <img class="frame-preview hidden" id="endFramePreview" alt="尾帧预览">
+                  <button class="btn-remove hidden" id="removeEndFrame">✕</button>
+                  <input type="file" id="endFrameInput" accept="image/*" hidden>
+                </div>
+              </div>
+            </div>
+
+            <button id="generateFrameVideoBtn" class="btn btn-primary btn-large">
+              <span class="btn-text">🎥 生成视频</span>
+              <span class="btn-loading hidden">⏳ 生成中...</span>
+            </button>
+          </div>
         </div>
 
         <div class="result-panel">
@@ -176,6 +298,7 @@
             <div class="result-actions hidden" id="resultActions">
               <button id="downloadBtn" class="btn btn-secondary btn-small">💾 下载</button>
               <button id="continueEditBtn" class="btn btn-secondary btn-small">✏️ 继续编辑</button>
+              <button id="generateVideoFromImageBtn" class="btn btn-primary btn-small hidden">🎬 生成视频</button>
             </div>
           </div>
           
@@ -248,6 +371,7 @@
         <div class="modal-image-actions">
           <button id="modalDownloadBtn" class="btn btn-secondary">💾 下载</button>
           <button id="modalEditBtn" class="btn btn-primary">✏️ 编辑此图</button>
+          <button id="modalGenerateVideoBtn" class="btn btn-primary">🎬 生成视频</button>
         </div>
       </div>
     </div>

@@ -273,6 +273,66 @@ app.get('/api/proxy-image', async (req, res) => {
   }
 });
 
+app.get('/api/proxy-video', async (req, res) => {
+  try {
+    const url = req.query.url;
+    console.log('Proxy video request URL:', url);
+    
+    if (!url) {
+      return res.status(400).json({ error: '缺少视频 URL' });
+    }
+
+    const videoResponse = await fetch(url);
+    if (!videoResponse.ok) {
+      const errorText = await videoResponse.text();
+      console.error('Video fetch failed:', videoResponse.status, errorText);
+      return res.status(videoResponse.status).json({ error: '视频下载失败' });
+    }
+
+    const contentType = videoResponse.headers.get('content-type') || 'video/mp4';
+    const arrayBuffer = await videoResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    res.set('Content-Type', contentType);
+    res.set('Content-Disposition', 'attachment; filename="nano-video.mp4"');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch (error) {
+    console.error('视频代理失败:', error);
+    res.status(500).json({ error: '视频代理失败' });
+  }
+});
+
+app.post('/api/proxy-video', async (req, res) => {
+  try {
+    const { url } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ error: '缺少视频 URL' });
+    }
+
+    const videoResponse = await fetch(url);
+    
+    if (!videoResponse.ok) {
+      const errorText = await videoResponse.text();
+      console.error('Video fetch failed:', videoResponse.status, errorText.substring(0, 200));
+      return res.status(videoResponse.status).json({ error: '视频下载失败' });
+    }
+
+    const contentType = videoResponse.headers.get('content-type') || 'video/mp4';
+    const arrayBuffer = await videoResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    res.set('Content-Type', contentType);
+    res.set('Content-Disposition', 'attachment; filename="nano-video.mp4"');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch (error) {
+    console.error('视频代理失败:', error);
+    res.status(500).json({ error: '视频代理失败' });
+  }
+});
+
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
