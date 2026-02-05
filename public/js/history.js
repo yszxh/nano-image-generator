@@ -1,6 +1,6 @@
 const HistoryManager = {
   STORAGE_KEY: 'nano_image_history',
-  MAX_ITEMS: 50,
+  MAX_ITEMS: 30,
 
   getAll() {
     try {
@@ -46,13 +46,29 @@ const HistoryManager = {
   },
 
   save(history) {
-    try {
-      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(history));
-    } catch (e) {
-      console.error('保存历史记录失败:', e);
-      if (e.name === 'QuotaExceededError') {
-        const trimmed = history.slice(0, Math.floor(history.length / 2));
-        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(trimmed));
+    let itemsToSave = [...history];
+    
+    while (itemsToSave.length > 0) {
+      try {
+        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(itemsToSave));
+        return;
+      } catch (e) {
+        if (e.name === 'QuotaExceededError') {
+          itemsToSave = itemsToSave.slice(0, Math.max(1, Math.floor(itemsToSave.length * 0.7)));
+          if (itemsToSave.length <= 1) {
+            try {
+              localStorage.removeItem(this.STORAGE_KEY);
+              localStorage.setItem(this.STORAGE_KEY, JSON.stringify(itemsToSave));
+              return;
+            } catch {
+              console.error('存储空间不足，无法保存历史记录');
+              return;
+            }
+          }
+        } else {
+          console.error('保存历史记录失败:', e);
+          return;
+        }
       }
     }
   },

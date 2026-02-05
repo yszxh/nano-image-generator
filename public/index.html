@@ -24,12 +24,27 @@
     </header>
 
     <main class="main-content">
-      <div class="tabs">
-        <button class="tab-btn active" data-tab="text2img">📝 文生图</button>
-        <button class="tab-btn" data-tab="img2img">🖼️ 图生图</button>
-        <button class="tab-btn" data-tab="text2video">🎬 文生视频</button>
-        <button class="tab-btn" data-tab="frame2video">🎥 图生视频</button>
-      </div>
+      <div class="desktop-layout">
+        <aside class="task-panel">
+          <div class="task-panel-header">
+            <h3>📋 任务队列</h3>
+            <span class="task-count" id="taskCount">0/3</span>
+          </div>
+          <div class="task-list" id="taskList">
+            <div class="task-empty">
+              <p>暂无任务</p>
+              <p class="task-hint">点击生成按钮添加任务</p>
+            </div>
+          </div>
+        </aside>
+
+        <div class="main-panel">
+          <div class="tabs">
+            <button class="tab-btn active" data-tab="text2img">📝 文生图</button>
+            <button class="tab-btn" data-tab="img2img">🖼️ 图生图</button>
+            <button class="tab-btn" data-tab="text2video">🎬 文生视频</button>
+            <button class="tab-btn" data-tab="frame2video">🎥 图生视频</button>
+          </div>
 
       <div class="content-wrapper">
         <div class="input-panel">
@@ -319,8 +334,22 @@
               <span class="info-value" id="resultTime"></span>
             </div>
           </div>
+          </div>
         </div>
       </div>
+
+      <aside class="history-panel">
+        <div class="history-header">
+          <h3>📜 历史记录</h3>
+          <button id="clearHistoryBtn" class="btn btn-text btn-small">清空历史</button>
+        </div>
+        <div class="history-grid" id="historyGrid">
+          <div class="history-empty">
+            <p>暂无历史记录</p>
+          </div>
+        </div>
+      </aside>
+    </div>
 
       <section class="history-section">
         <div class="history-header">

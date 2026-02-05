@@ -31,6 +31,136 @@ document.addEventListener('DOMContentLoaded', () => {
     lastVideoBlobUrl: null
   };
 
+  const TaskManager = {
+    MAX_TASKS: 3,
+    tasks: [],
+    activeTaskId: null,
+
+    canAddTask() {
+      return this.tasks.length < this.MAX_TASKS;
+    },
+
+    addTask(config) {
+      if (!this.canAddTask()) {
+        UI.showToast('任务队列已满，最多3个任务', 'warning');
+        return null;
+      }
+      const task = {
+        id: Date.now().toString(),
+        type: config.type,
+        prompt: config.prompt,
+        status: 'running',
+        progress: 0,
+        result: null,
+        createdAt: new Date().toISOString()
+      };
+      this.tasks.push(task);
+      this.activeTaskId = task.id;
+      this.render();
+      this.updateCount();
+      return task;
+    },
+
+    updateTask(id, updates) {
+      const task = this.tasks.find(t => t.id === id);
+      if (task) {
+        Object.assign(task, updates);
+        this.render();
+      }
+    },
+
+    removeTask(id) {
+      this.tasks = this.tasks.filter(t => t.id !== id);
+      if (this.activeTaskId === id && this.tasks.length > 0) {
+        this.activeTaskId = this.tasks[0].id;
+      } else if (this.tasks.length === 0) {
+        this.activeTaskId = null;
+      }
+      this.render();
+      this.updateCount();
+    },
+
+    setActive(id) {
+      this.activeTaskId = id;
+      const task = this.tasks.find(t => t.id === id);
+      if (task?.result) {
+        if (task.type.includes('video')) {
+          showVideoResult(task.result);
+        } else {
+          showResult(task.result);
+        }
+      }
+      this.render();
+    },
+
+    render() {
+      const taskList = document.getElementById('taskList');
+      if (!taskList) return;
+
+      if (this.tasks.length === 0) {
+        taskList.innerHTML = `
+          <div class="task-empty">
+            <p>暂无任务</p>
+            <p class="task-hint">点击生成按钮添加任务</p>
+          </div>
+        `;
+        return;
+      }
+
+      taskList.innerHTML = this.tasks.map(task => {
+        const typeLabels = {
+          'text2img': '文生图',
+          'img2img': '图生图',
+          'text2video': '文生视频',
+          'frame2video': '图生视频'
+        };
+
+        const statusLabels = {
+          'running': '生成中',
+          'completed': '已完成',
+          'failed': '失败'
+        };
+
+        return `
+          <div class="task-card ${task.status} ${task.id === this.activeTaskId ? 'active' : ''}" data-id="${task.id}">
+            <div class="task-card-header">
+              <span class="task-type">${typeLabels[task.type] || task.type}</span>
+              <span class="task-status">${statusLabels[task.status]}</span>
+            </div>
+            <div class="task-prompt">${task.prompt}</div>
+            ${task.status === 'running' ? `
+              <div class="task-progress">
+                <div class="task-progress-fill" style="width: ${task.progress}%"></div>
+              </div>
+            ` : ''}
+            <button class="task-delete" data-id="${task.id}">✕</button>
+          </div>
+        `;
+      }).join('');
+
+      taskList.querySelectorAll('.task-card').forEach(card => {
+        card.addEventListener('click', (e) => {
+          if (e.target.classList.contains('task-delete')) return;
+          this.setActive(card.dataset.id);
+        });
+      });
+
+      taskList.querySelectorAll('.task-delete').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.removeTask(btn.dataset.id);
+        });
+      });
+    },
+
+    updateCount() {
+      const countEl = document.getElementById('taskCount');
+      if (countEl) {
+        countEl.textContent = `${this.tasks.length}/3`;
+      }
+    }
+  };
+
   function buildModelName() {
     const versionConfig = MODEL_CONFIG.versions[state.modelVersion];
     const ratioConfig = MODEL_CONFIG.ratios[state.ratio];
@@ -543,12 +673,27 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const task = TaskManager.addTask({
+      type: 'text2img',
+      prompt: prompt
+    });
+    if (!task) return;
+
     UI.setLoading('generateBtn', true);
     showProgressResult();
 
     try {
       const model = getModel();
-      const result = await ImageAPI.generateImage(prompt, state.apiKey, model, updateProgress);
+      const result = await ImageAPI.generateImage(prompt, state.apiKey, model, (progress) => {
+        updateProgress(progress);
+        TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+      });
+      
+      TaskManager.updateTask(task.id, { 
+        status: 'completed', 
+        result: result 
+      });
+      
       state.lastGeneratedImage = result;
       
       HistoryManager.add({
@@ -563,6 +708,8 @@ document.addEventListener('DOMContentLoaded', () => {
       renderHistory();
       UI.showToast('图片生成成功！', 'success');
     } catch (error) {
+      TaskManager.updateTask(task.id, { status: 'failed' });
+      
       UI.showToast(error.message || '生成失败，请重试', 'error');
       hideLoadingResult();
     } finally {
@@ -589,6 +736,12 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const task = TaskManager.addTask({
+      type: 'img2img',
+      prompt: prompt
+    });
+    if (!task) return;
+
     UI.setLoading('editBtn', true);
     showProgressResult();
 
@@ -600,7 +753,15 @@ document.addEventListener('DOMContentLoaded', () => {
         model,
         mainImageBase64: state.mainImage,
         referenceImagesBase64: state.referenceImages.length > 0 ? state.referenceImages : undefined,
-        onProgress: updateProgress
+        onProgress: (progress) => {
+          updateProgress(progress);
+          TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+        }
+      });
+
+      TaskManager.updateTask(task.id, { 
+        status: 'completed', 
+        result: result 
       });
 
       state.lastGeneratedImage = result;
@@ -617,6 +778,8 @@ document.addEventListener('DOMContentLoaded', () => {
       renderHistory();
       UI.showToast('图片编辑成功！', 'success');
     } catch (error) {
+      TaskManager.updateTask(task.id, { status: 'failed' });
+      
       UI.showToast(error.message || '编辑失败，请重试', 'error');
       hideLoadingResult();
     } finally {
@@ -701,11 +864,26 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const task = TaskManager.addTask({
+      type: 'text2video',
+      prompt: prompt
+    });
+    if (!task) return;
+
     UI.setLoading('generateVideoBtn', true);
     showVideoProgressResult();
 
     try {
-      const result = await ImageAPI.generateVideo(prompt, state.apiKey, state.videoRatio, updateProgress);
+      const result = await ImageAPI.generateVideo(prompt, state.apiKey, state.videoRatio, (progress) => {
+        updateProgress(progress);
+        TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+      });
+      
+      TaskManager.updateTask(task.id, { 
+        status: 'completed', 
+        result: result 
+      });
+      
       state.lastGeneratedVideo = result;
       state.lastGeneratedImage = null;
       
@@ -722,6 +900,8 @@ document.addEventListener('DOMContentLoaded', () => {
       renderHistory();
       UI.showToast('视频生成成功！', 'success');
     } catch (error) {
+      TaskManager.updateTask(task.id, { status: 'failed' });
+      
       UI.showToast(error.message || '生成失败，请重试', 'error');
       hideLoadingResult();
     } finally {
@@ -742,11 +922,22 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    if (state.videoRatio === 'portrait') {
+      UI.showToast('由于官方升级，图生视频竖屏模式暂不可用，请选择横屏', 'warning');
+      return;
+    }
+
     if (!state.apiKey) {
       UI.showToast('请先配置 API Key', 'warning');
       document.getElementById('settingsBtn').click();
       return;
     }
+
+    const task = TaskManager.addTask({
+      type: 'frame2video',
+      prompt: prompt
+    });
+    if (!task) return;
 
     UI.setLoading('generateFrameVideoBtn', true);
     showVideoProgressResult();
@@ -758,7 +949,15 @@ document.addEventListener('DOMContentLoaded', () => {
         ratio: state.videoRatio,
         startFrameBase64: state.startFrame,
         endFrameBase64: state.endFrame,
-        onProgress: updateProgress
+        onProgress: (progress) => {
+          updateProgress(progress);
+          TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+        }
+      });
+      
+      TaskManager.updateTask(task.id, { 
+        status: 'completed', 
+        result: result 
       });
       
       state.lastGeneratedVideo = result;
@@ -777,6 +976,8 @@ document.addEventListener('DOMContentLoaded', () => {
       renderHistory();
       UI.showToast('视频生成成功！', 'success');
     } catch (error) {
+      TaskManager.updateTask(task.id, { status: 'failed' });
+      
       UI.showToast(error.message || '生成失败，请重试', 'error');
       hideLoadingResult();
     } finally {

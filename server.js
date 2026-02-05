@@ -16,7 +16,7 @@ dotenvConfig();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_BASE_URL = 'https://api.yyds168.net/v1/chat/completions';
+const API_BASE_URL = 'https://vip.yyds168.net/v1/chat/completions';
 const DEFAULT_MODEL = 'gemini-3.0-pro-image-portrait';
 
 // 中间件
@@ -46,18 +46,65 @@ function getMimeType(filename) {
 
 // 从流式响应中提取图片 URL
 function extractImageUrl(text) {
-  const urlPattern = /https?:\/\/[^\s"\\)]+(?<!")/g;
+  const urlPattern = /https?:\/\/[^\s"\\)\]>]+/g;
   const matches = text.match(urlPattern);
   if (matches) {
-    // 过滤出图片 URL
     for (const url of matches) {
-      if (url.match(/\.(png|jpg|jpeg|webp|gif)/i) || url.includes('image') || url.includes('cdn')) {
-        return url;
+      const cleanUrl = url.replace(/["'\\>]+$/, '');
+      if (cleanUrl.match(/\.(png|jpg|jpeg|webp|gif)/i) || cleanUrl.includes('image') || cleanUrl.includes('cdn') || cleanUrl.includes('storage')) {
+        return cleanUrl;
       }
     }
-    return matches[0];
+    return matches[0].replace(/["'\\>]+$/, '');
   }
   return null;
+}
+
+// 解析 SSE 流式响应
+function parseSSEStream(rawText) {
+  let fullContent = '';
+  let reasoningContent = '';
+  let hasError = false;
+  let errorMessage = '';
+
+  const lines = rawText.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) continue;
+
+    const payloadStr = trimmed.slice(5).trim();
+    if (payloadStr === '[DONE]') break;
+
+    try {
+      const data = JSON.parse(payloadStr);
+
+      if (data.error) {
+        hasError = true;
+        errorMessage = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+        break;
+      }
+
+      const choices = data.choices || [];
+      if (choices.length === 0) continue;
+
+      const delta = choices[0].delta || {};
+
+      if (delta.content) {
+        fullContent += delta.content;
+      }
+      if (delta.reasoning_content) {
+        reasoningContent += delta.reasoning_content;
+        if (['❌', '生成失败', '违规'].some(kw => delta.reasoning_content.includes(kw))) {
+          hasError = true;
+          errorMessage = delta.reasoning_content;
+        }
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+
+  return { fullContent, reasoningContent, hasError, errorMessage };
 }
 
 // 调用 API 生成图片
@@ -68,14 +115,28 @@ async function callImageApi(messages, apiKey, model = DEFAULT_MODEL) {
     messages
   };
 
-  const response = await fetch(API_BASE_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+
+  let response;
+  try {
+    response = await fetch(API_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === 'AbortError') {
+      throw new Error('请求超时，请重试');
+    }
+    throw new Error(`网络请求失败: ${e.message}`);
+  }
+  clearTimeout(timeoutId);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -83,13 +144,19 @@ async function callImageApi(messages, apiKey, model = DEFAULT_MODEL) {
   }
 
   const rawText = await response.text();
-  const imageUrl = extractImageUrl(rawText);
+  const { fullContent, reasoningContent, hasError, errorMessage } = parseSSEStream(rawText);
+
+  if (hasError) {
+    throw new Error(`生成失败: ${errorMessage}`);
+  }
+
+  const allContent = fullContent + ' ' + reasoningContent;
+  const imageUrl = extractImageUrl(allContent);
 
   if (!imageUrl) {
     throw new Error('未能从响应中提取图片 URL');
   }
 
-  // 下载图片
   const imageResponse = await fetch(imageUrl);
   if (!imageResponse.ok) {
     throw new Error(`图片下载失败: ${imageUrl}`);
@@ -330,6 +397,195 @@ app.post('/api/proxy-video', async (req, res) => {
   } catch (error) {
     console.error('视频代理失败:', error);
     res.status(500).json({ error: '视频代理失败' });
+  }
+});
+
+const VIDEO_MODELS = {
+  text2video: {
+    landscape: 'veo_3_1_t2v_landscape',
+    portrait: 'veo_3_1_t2v_portrait'
+  },
+  frame2video: {
+    landscape: 'veo_3_1_i2v_s_landscape',
+    portrait: 'veo_3_1_i2v_s_portrait'
+  }
+};
+
+function extractVideoUrl(text) {
+  const urlPattern = /https?:\/\/[^\s"\\)\]>']+/g;
+  const matches = text.match(urlPattern);
+  if (matches) {
+    for (const url of matches) {
+      const cleanUrl = url.replace(/["'\\>]+$/, '');
+      if (cleanUrl.match(/\.(mp4|webm)/i) || cleanUrl.includes('video') || cleanUrl.includes('videofx')) {
+        return cleanUrl;
+      }
+    }
+    return matches[0].replace(/["'\\>]+$/, '');
+  }
+  return null;
+}
+
+async function callVideoApi(messages, apiKey, model) {
+  const payload = {
+    model,
+    stream: true,
+    messages
+  };
+
+  console.log('视频 API 完整 payload:');
+  console.log('Model:', model);
+  console.log('Messages structure:', JSON.stringify(messages[0].content.map(c => ({ type: c.type, urlPrefix: c.image_url?.url?.substring(0, 80) })), null, 2));
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+
+  let response;
+  try {
+    response = await fetch(API_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === 'AbortError') {
+      throw new Error('请求超时，请重试');
+    }
+    throw new Error(`网络请求失败: ${e.message}`);
+  }
+  clearTimeout(timeoutId);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`API 请求失败 (${response.status}): ${errorText}`);
+  }
+
+  const rawText = await response.text();
+  console.log('视频 API 原始响应 (前1500字符):', rawText.substring(0, 1500));
+  const { fullContent, reasoningContent, hasError, errorMessage } = parseSSEStream(rawText);
+
+  if (hasError) {
+    throw new Error(`生成失败: ${errorMessage}`);
+  }
+
+  const allContent = fullContent + ' ' + reasoningContent;
+  const videoUrl = extractVideoUrl(allContent);
+
+  if (!videoUrl) {
+    throw new Error('未能从响应中提取视频 URL');
+  }
+
+  return { videoUrl };
+}
+
+app.post('/api/generate-video', async (req, res) => {
+  try {
+    const { prompt, apiKey, ratio } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: '请输入提示词' });
+    }
+
+    if (!apiKey) {
+      return res.status(400).json({ success: false, error: '请配置 API Key' });
+    }
+
+    const model = VIDEO_MODELS.text2video[ratio] || VIDEO_MODELS.text2video.landscape;
+
+    const messages = [{
+      role: 'user',
+      content: [{ type: 'text', text: prompt }]
+    }];
+
+    const result = await callVideoApi(messages, apiKey, model);
+
+    res.json({
+      success: true,
+      id: uuidv4(),
+      prompt,
+      videoUrl: result.videoUrl,
+      createdAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('生成视频失败:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || '生成视频失败'
+    });
+  }
+});
+
+app.post('/api/generate-video-from-frames', async (req, res) => {
+  try {
+    const { prompt, apiKey, ratio, startFrameBase64, endFrameBase64 } = req.body;
+
+    const imageSizeKB = startFrameBase64 ? Math.round(startFrameBase64.length * 0.75 / 1024) : 0;
+    console.log('图生视频请求:', {
+      prompt,
+      ratio,
+      hasStartFrame: !!startFrameBase64,
+      imageSizeKB: imageSizeKB + ' KB',
+      startFramePrefix: startFrameBase64?.substring(0, 50),
+      hasEndFrame: !!endFrameBase64
+    });
+
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: '请输入提示词' });
+    }
+
+    if (!apiKey) {
+      return res.status(400).json({ success: false, error: '请配置 API Key' });
+    }
+
+    if (!startFrameBase64) {
+      return res.status(400).json({ success: false, error: '请上传起始帧图片' });
+    }
+
+    const model = VIDEO_MODELS.frame2video[ratio] || VIDEO_MODELS.frame2video.landscape;
+    console.log('使用模型:', model);
+
+    const contentParts = [{ type: 'text', text: prompt }];
+    
+    contentParts.push({
+      type: 'image_url',
+      image_url: { url: startFrameBase64 }
+    });
+    
+    // 暂时禁用结束帧，API 可能不支持
+    // if (endFrameBase64) {
+    //   contentParts.push({
+    //     type: 'image_url',
+    //     image_url: { url: endFrameBase64 }
+    //   });
+    // }
+
+    const messages = [{
+      role: 'user',
+      content: contentParts
+    }];
+
+    const result = await callVideoApi(messages, apiKey, model);
+
+    res.json({
+      success: true,
+      id: uuidv4(),
+      prompt,
+      videoUrl: result.videoUrl,
+      createdAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('图生视频失败:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || '图生视频失败'
+    });
   }
 });
 
