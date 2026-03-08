@@ -401,6 +401,59 @@ body {
   flex-wrap: wrap;
 }
 
+.video-mode-selector {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.video-mode-card {
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: var(--radius);
+  padding: 16px;
+  text-align: left;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.video-mode-card strong {
+  display: block;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  font-size: 0.95rem;
+}
+
+.video-mode-card span {
+  display: block;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.video-mode-card:hover,
+.video-mode-card.active {
+  border-color: var(--primary);
+  background: rgba(99, 102, 241, 0.08);
+  transform: translateY(-1px);
+}
+
+.video-subpanel {
+  display: none;
+}
+
+.video-subpanel.active {
+  display: block;
+}
+
+.single-frame-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.reference-video-container {
+  align-items: flex-start;
+}
+
 .reference-preview-item {
   position: relative;
   width: 100px;
@@ -2057,4 +2110,10 @@ html {
 .task-delete:hover {
   background: var(--error);
   color: white;
+}
+
+@media (max-width: 1024px) {
+  .video-mode-selector {
+    grid-template-columns: 1fr;
+  }
 }

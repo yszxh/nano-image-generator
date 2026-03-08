@@ -1,38 +1,63 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { config as dotenvConfig } from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs/promises';
 
-// ES Module __dirname 兼容
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 加载环境变量
 dotenvConfig();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_BASE_URL = 'https://vip.yyds168.net/v1/chat/completions';
-const DEFAULT_MODEL = 'gemini-3.0-pro-image-portrait';
+const FLOW2API_BASE_URL = process.env.FLOW2API_BASE_URL || 'https://vip.yyds168.net/v1/chat/completions';
+const REQUEST_TIMEOUT_MS = Number(process.env.FLOW2API_TIMEOUT_MS || 300000);
+const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-landscape';
+const DEFAULT_VIDEO_MODELS = {
+  text2video: {
+    landscape: 'veo_3_1_t2v_fast_landscape',
+    portrait: 'veo_3_1_t2v_fast_portrait'
+  },
+  frame2video: {
+    landscape: 'veo_3_1_i2v_s_fast_fl',
+    portrait: 'veo_3_1_i2v_s_fast_portrait_fl'
+  },
+  reference2video: {
+    landscape: 'veo_3_1_r2v_fast',
+    portrait: 'veo_3_1_r2v_fast_portrait'
+  }
+};
 
-// 中间件
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }
+});
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// 文件上传配置
-const storage = multer.memoryStorage();
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024 } // 20MB 限制
-});
+function createAbortController(timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return { controller, timeoutId };
+}
 
-// 获取 MIME 类型
-function getMimeType(filename) {
+function clearAbortTimeout(timeoutId) {
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+}
+
+function withResolvedApiKey(inputKey) {
+  return inputKey || process.env.FLOW2API_API_KEY || process.env.GEMINI_API_KEY || '';
+}
+
+function getMimeType(filename = '') {
   const ext = path.extname(filename).toLowerCase();
   const mimeTypes = {
     '.jpg': 'image/jpeg',
@@ -44,567 +69,638 @@ function getMimeType(filename) {
   return mimeTypes[ext] || 'image/jpeg';
 }
 
-// 从流式响应中提取图片 URL
-function extractImageUrl(text) {
-  const urlPattern = /https?:\/\/[^\s"\\)\]>]+/g;
-  const matches = text.match(urlPattern);
-  if (matches) {
-    for (const url of matches) {
-      const cleanUrl = url.replace(/["'\\>]+$/, '');
-      if (cleanUrl.match(/\.(png|jpg|jpeg|webp|gif)/i) || cleanUrl.includes('image') || cleanUrl.includes('cdn') || cleanUrl.includes('storage')) {
-        return cleanUrl;
-      }
-    }
-    return matches[0].replace(/["'\\>]+$/, '');
+function parseMaybeJsonArray(value) {
+  if (!value) {
+    return [];
   }
-  return null;
+
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
-// 解析 SSE 流式响应
+function sanitizeUrl(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+
+  const cleaned = value.replace(/["'\\>\])]+$/g, '').trim();
+
+  try {
+    const parsed = new URL(cleaned);
+    if (!['http:', 'https:', 'data:'].includes(parsed.protocol)) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return cleaned.startsWith('data:') ? cleaned : null;
+  }
+}
+
+function collectUrls(text) {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+
+  const matches = text.match(/https?:\/\/[^\s"'\\)\]>]+/g) || [];
+  return matches
+    .map((match) => match.replace(/["'\\>\])]+$/g, ''))
+    .filter(Boolean);
+}
+
+function normalizeContent(content) {
+  if (!content) {
+    return { textParts: [], urls: [] };
+  }
+
+  if (typeof content === 'string') {
+    return { textParts: [content], urls: collectUrls(content) };
+  }
+
+  if (Array.isArray(content)) {
+    return content.reduce(
+      (acc, item) => {
+        const normalized = normalizeContent(item);
+        acc.textParts.push(...normalized.textParts);
+        acc.urls.push(...normalized.urls);
+        return acc;
+      },
+      { textParts: [], urls: [] }
+    );
+  }
+
+  if (typeof content === 'object') {
+    const textParts = [];
+    const urls = [];
+
+    if (typeof content.text === 'string') {
+      textParts.push(content.text);
+      urls.push(...collectUrls(content.text));
+    }
+
+    if (typeof content.content === 'string') {
+      textParts.push(content.content);
+      urls.push(...collectUrls(content.content));
+    }
+
+    if (typeof content.reasoning_content === 'string') {
+      textParts.push(content.reasoning_content);
+      urls.push(...collectUrls(content.reasoning_content));
+    }
+
+    const mediaUrl = sanitizeUrl(content?.image_url?.url || content?.video_url?.url || content?.url);
+    if (mediaUrl) {
+      urls.push(mediaUrl);
+    }
+
+    return { textParts, urls };
+  }
+
+  return { textParts: [], urls: [] };
+}
+
 function parseSSEStream(rawText) {
-  let fullContent = '';
-  let reasoningContent = '';
-  let hasError = false;
-  let errorMessage = '';
+  const contentParts = [];
+  const reasoningParts = [];
+  const urls = [];
+  const errors = [];
 
-  const lines = rawText.split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('data:')) continue;
+  for (const rawLine of rawText.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) {
+      continue;
+    }
 
-    const payloadStr = trimmed.slice(5).trim();
-    if (payloadStr === '[DONE]') break;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') {
+      continue;
+    }
 
     try {
-      const data = JSON.parse(payloadStr);
-
-      if (data.error) {
-        hasError = true;
-        errorMessage = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
-        break;
+      const parsed = JSON.parse(payload);
+      if (parsed.error) {
+        errors.push(typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error));
+        continue;
       }
 
-      const choices = data.choices || [];
-      if (choices.length === 0) continue;
+      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+      for (const choice of choices) {
+        const chunks = [
+          choice?.delta?.content,
+          choice?.delta?.reasoning_content,
+          choice?.message?.content,
+          choice?.message?.reasoning_content
+        ];
 
-      const delta = choices[0].delta || {};
+        for (const chunk of chunks) {
+          const normalized = normalizeContent(chunk);
+          if (chunk === choice?.delta?.reasoning_content || chunk === choice?.message?.reasoning_content) {
+            reasoningParts.push(...normalized.textParts);
+          } else {
+            contentParts.push(...normalized.textParts);
+          }
+          urls.push(...normalized.urls);
+        }
 
-      if (delta.content) {
-        fullContent += delta.content;
-      }
-      if (delta.reasoning_content) {
-        reasoningContent += delta.reasoning_content;
-        if (['❌', '生成失败', '违规'].some(kw => delta.reasoning_content.includes(kw))) {
-          hasError = true;
-          errorMessage = delta.reasoning_content;
+        if (choice?.finish_reason === 'content_filter') {
+          errors.push('Flow2API rejected this request because it was filtered upstream.');
         }
       }
-    } catch (e) {
+    } catch {
       continue;
     }
   }
 
-  return { fullContent, reasoningContent, hasError, errorMessage };
+  const reasoningText = reasoningParts.join(' ').trim();
+  const errorMessage = errors[0]
+    || (/(生成失败|违规|blocked|safety|forbidden|denied)/i.test(reasoningText) ? reasoningText : '');
+
+  return {
+    contentText: contentParts.join(' ').trim(),
+    reasoningText,
+    urls: [...new Set(urls)],
+    errorMessage
+  };
 }
 
-// 调用 API 生成图片
-async function callImageApi(messages, apiKey, model = DEFAULT_MODEL) {
+function pickMediaUrl(parsed, type) {
+  const extensions = type === 'video'
+    ? ['.mp4', '.webm', '.mov']
+    : ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+  const keywords = type === 'video'
+    ? ['video', 'videofx']
+    : ['image', 'img', 'cdn', 'storage'];
+
+  const candidates = parsed.urls || [];
+  for (const url of candidates) {
+    const lower = url.toLowerCase();
+    if (extensions.some((ext) => lower.includes(ext)) || keywords.some((keyword) => lower.includes(keyword))) {
+      return url;
+    }
+  }
+
+  return candidates[0] || null;
+}
+
+async function safeReadErrorText(response) {
+  try {
+    const text = await response.text();
+    return text.slice(0, 600);
+  } catch {
+    return 'Failed to read upstream error body.';
+  }
+}
+
+function parseUpstreamError(errorText) {
+  if (!errorText) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(errorText);
+    if (parsed?.error) {
+      if (typeof parsed.error === 'string') {
+        return { message: parsed.error, code: '' };
+      }
+      return {
+        message: parsed.error.message || JSON.stringify(parsed.error),
+        code: parsed.error.code || parsed.error.type || ''
+      };
+    }
+  } catch {
+    return {
+      message: errorText,
+      code: ''
+    };
+  }
+
+  return null;
+}
+
+function toFriendlyFlow2ApiError(status, model, errorText) {
+  const parsed = parseUpstreamError(errorText);
+  const rawMessage = parsed?.message || errorText || '';
+  const errorCode = (parsed?.code || '').toLowerCase();
+  const lowerMessage = rawMessage.toLowerCase();
+
+  if (status === 401 || status === 403 || /invalid api key|invalid token|unauthorized|authentication|bearer/i.test(rawMessage)) {
+    return 'Flow2API key 无效或已过期，请重新填写。';
+  }
+
+  if (errorCode === 'model_not_found' || /no available channel for model|model_not_found|model not found/i.test(lowerMessage)) {
+    return `当前上游渠道不可用模型 ${model}。这通常是 API Key/渠道不匹配，或该渠道暂未开通这个模型。`;
+  }
+
+  if (status === 429 || /rate limit|too many requests|quota|credits/i.test(lowerMessage)) {
+    return 'Flow2API 当前已限流或额度不足，请稍后重试或检查账户额度。';
+  }
+
+  if (status >= 500) {
+    return `Flow2API 上游暂时不可用 (${status})：${rawMessage || '请稍后重试。'}`;
+  }
+
+  return `Flow2API 请求失败 (${status})：${rawMessage || '未知错误。'}`;
+}
+
+async function callFlow2Api({ messages, apiKey, model, type }) {
+  const resolvedApiKey = withResolvedApiKey(apiKey);
+  if (!resolvedApiKey) {
+    throw new Error('Missing Flow2API key.');
+  }
+
   const payload = {
     model,
     stream: true,
     messages
   };
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
+  const { controller, timeoutId } = createAbortController();
 
   let response;
   try {
-    response = await fetch(API_BASE_URL, {
+    response = await fetch(FLOW2API_BASE_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        Authorization: `Bearer ${resolvedApiKey}`
       },
       body: JSON.stringify(payload),
       signal: controller.signal
     });
-  } catch (e) {
-    clearTimeout(timeoutId);
-    if (e.name === 'AbortError') {
-      throw new Error('请求超时，请重试');
+  } catch (error) {
+    clearAbortTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Flow2API request timed out.');
     }
-    throw new Error(`网络请求失败: ${e.message}`);
+    throw new Error(`Flow2API request failed: ${error.message}`);
   }
-  clearTimeout(timeoutId);
+
+  clearAbortTimeout(timeoutId);
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`API 请求失败 (${response.status}): ${errorText}`);
+    const errorText = await safeReadErrorText(response);
+    throw new Error(toFriendlyFlow2ApiError(response.status, model, errorText));
   }
 
   const rawText = await response.text();
-  const { fullContent, reasoningContent, hasError, errorMessage } = parseSSEStream(rawText);
+  const parsed = parseSSEStream(rawText);
 
-  if (hasError) {
-    throw new Error(`生成失败: ${errorMessage}`);
+  if (parsed.errorMessage) {
+    throw new Error(parsed.errorMessage);
   }
 
-  const allContent = fullContent + ' ' + reasoningContent;
-  const imageUrl = extractImageUrl(allContent);
-
-  if (!imageUrl) {
-    throw new Error('未能从响应中提取图片 URL');
+  const mediaUrl = pickMediaUrl(parsed, type);
+  if (!mediaUrl) {
+    throw new Error(`Unable to extract ${type} URL from Flow2API response.`);
   }
-
-  const imageResponse = await fetch(imageUrl);
-  if (!imageResponse.ok) {
-    throw new Error(`图片下载失败: ${imageUrl}`);
-  }
-
-  const arrayBuffer = await imageResponse.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-  const base64 = buffer.toString('base64');
 
   return {
-    imageUrl,
-    imageBase64: `data:image/png;base64,${base64}`,
-    rawResponse: rawText
+    mediaUrl,
+    rawText,
+    parsed
   };
 }
 
-// API 路由：文生图
+async function downloadMedia(url) {
+  const sanitizedUrl = sanitizeUrl(url);
+  if (!sanitizedUrl || sanitizedUrl.startsWith('data:')) {
+    throw new Error('Invalid remote media URL.');
+  }
+
+  const { controller, timeoutId } = createAbortController();
+
+  let response;
+  try {
+    response = await fetch(sanitizedUrl, { signal: controller.signal });
+  } catch (error) {
+    clearAbortTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Media download timed out.');
+    }
+    throw new Error(`Media download failed: ${error.message}`);
+  }
+
+  clearAbortTimeout(timeoutId);
+
+  if (!response.ok) {
+    const errorText = await safeReadErrorText(response);
+    throw new Error(`Media download failed (${response.status}): ${errorText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    contentType: response.headers.get('content-type') || 'application/octet-stream'
+  };
+}
+
+function bufferToDataUrl(buffer, contentType) {
+  return `data:${contentType};base64,${buffer.toString('base64')}`;
+}
+
+function ensurePrompt(prompt) {
+  return typeof prompt === 'string' ? prompt.trim() : '';
+}
+
+function buildImageMessages(prompt, imageSources = []) {
+  const content = [{ type: 'text', text: prompt }];
+
+  for (const source of imageSources.filter(Boolean)) {
+    content.push({
+      type: 'image_url',
+      image_url: { url: source }
+    });
+  }
+
+  return [{ role: 'user', content }];
+}
+
+async function proxyMediaRequest(url, res, defaultContentType, fileName) {
+  const sanitizedUrl = sanitizeUrl(url);
+  if (!sanitizedUrl || sanitizedUrl.startsWith('data:')) {
+    return res.status(400).json({ error: 'Invalid media URL.' });
+  }
+
+  const { controller, timeoutId } = createAbortController();
+
+  let upstream;
+  try {
+    upstream = await fetch(sanitizedUrl, { signal: controller.signal });
+  } catch (error) {
+    clearAbortTimeout(timeoutId);
+    const message = error.name === 'AbortError' ? 'Media proxy timed out.' : `Media proxy failed: ${error.message}`;
+    return res.status(502).json({ error: message });
+  }
+
+  clearAbortTimeout(timeoutId);
+
+  if (!upstream.ok) {
+    const errorText = await safeReadErrorText(upstream);
+    return res.status(upstream.status).json({ error: errorText });
+  }
+
+  res.set('Content-Type', upstream.headers.get('content-type') || defaultContentType);
+  res.set('Cache-Control', 'public, max-age=86400');
+  if (fileName) {
+    res.set('Content-Disposition', `attachment; filename="${fileName}"`);
+  }
+
+  if (!upstream.body) {
+    return res.status(502).json({ error: 'Upstream response body is empty.' });
+  }
+
+  Readable.fromWeb(upstream.body).pipe(res);
+}
+
+app.get('/api/config/status', (req, res) => {
+  const configuredKey = withResolvedApiKey('');
+  res.json({
+    hasServerKey: Boolean(configuredKey),
+    flow2apiBaseUrl: FLOW2API_BASE_URL,
+    message: configuredKey ? 'Server-side Flow2API key is configured.' : 'Configure Flow2API key in the browser or server environment.'
+  });
+});
+
 app.post('/api/generate', async (req, res) => {
   try {
-    const { prompt, apiKey, model } = req.body;
+    const prompt = ensurePrompt(req.body.prompt);
+    const model = req.body.model || DEFAULT_IMAGE_MODEL;
+    const apiKey = withResolvedApiKey(req.body.apiKey);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: '请输入提示词' });
+      return res.status(400).json({ success: false, error: 'Prompt is required.' });
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: '请配置 API Key' });
+      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
     }
 
-    const messages = [
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt }
-        ]
-      }
-    ];
-
-    const result = await callImageApi(messages, apiKey, model);
+    const messages = buildImageMessages(prompt);
+    const result = await callFlow2Api({ messages, apiKey, model, type: 'image' });
+    const media = await downloadMedia(result.mediaUrl);
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
-      imageBase64: result.imageBase64,
-      imageUrl: result.imageUrl,
+      model,
+      imageUrl: result.mediaUrl,
+      imageBase64: bufferToDataUrl(media.buffer, media.contentType),
       createdAt: new Date().toISOString()
     });
-
   } catch (error) {
-    console.error('生成图片失败:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message || '生成图片失败'
-    });
+    console.error('Image generation failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Image generation failed.' });
   }
 });
 
-// API 路由：图生图
 app.post('/api/edit', upload.fields([
   { name: 'mainImage', maxCount: 1 },
   { name: 'referenceImages', maxCount: 5 }
 ]), async (req, res) => {
   try {
-    const { prompt, apiKey, model, mainImageBase64 } = req.body;
+    const prompt = ensurePrompt(req.body.prompt);
+    const model = req.body.model || DEFAULT_IMAGE_MODEL;
+    const apiKey = withResolvedApiKey(req.body.apiKey);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: '请输入编辑提示词' });
+      return res.status(400).json({ success: false, error: 'Prompt is required.' });
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: '请配置 API Key' });
+      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
     }
 
-    const contentParts = [{ type: 'text', text: prompt }];
+    const imageSources = [];
 
-    // 处理主图片
-    if (mainImageBase64) {
-      // 从 base64 字符串获取图片
-      contentParts.push({
-        type: 'image_url',
-        image_url: { url: mainImageBase64 }
-      });
-    } else if (req.files && req.files['mainImage']) {
-      const mainImage = req.files['mainImage'][0];
-      const mimeType = getMimeType(mainImage.originalname);
-      const base64 = mainImage.buffer.toString('base64');
-      contentParts.push({
-        type: 'image_url',
-        image_url: { url: `data:${mimeType};base64,${base64}` }
-      });
-    } else {
-      return res.status(400).json({ success: false, error: '请上传要编辑的图片' });
+    if (req.body.mainImageBase64) {
+      imageSources.push(req.body.mainImageBase64);
+    } else if (req.files?.mainImage?.[0]) {
+      const mainImage = req.files.mainImage[0];
+      imageSources.push(`data:${getMimeType(mainImage.originalname)};base64,${mainImage.buffer.toString('base64')}`);
     }
 
-    // 处理参考图片
-    if (req.files && req.files['referenceImages']) {
-      for (const refImage of req.files['referenceImages']) {
-        const mimeType = getMimeType(refImage.originalname);
-        const base64 = refImage.buffer.toString('base64');
-        contentParts.push({
-          type: 'image_url',
-          image_url: { url: `data:${mimeType};base64,${base64}` }
-        });
+    if (imageSources.length === 0) {
+      return res.status(400).json({ success: false, error: 'Main image is required.' });
+    }
+
+    for (const refImage of req.files?.referenceImages || []) {
+      imageSources.push(`data:${getMimeType(refImage.originalname)};base64,${refImage.buffer.toString('base64')}`);
+    }
+
+    for (const refBase64 of parseMaybeJsonArray(req.body.referenceImagesBase64)) {
+      if (typeof refBase64 === 'string' && refBase64.startsWith('data:image/')) {
+        imageSources.push(refBase64);
       }
     }
 
-    // 处理 base64 格式的参考图片
-    const referenceImagesBase64 = req.body.referenceImagesBase64;
-    if (referenceImagesBase64) {
-      const refImages = JSON.parse(referenceImagesBase64);
-      for (const refBase64 of refImages) {
-        contentParts.push({
-          type: 'image_url',
-          image_url: { url: refBase64 }
-        });
-      }
-    }
-
-    const messages = [
-      {
-        role: 'user',
-        content: contentParts
-      }
-    ];
-
-    const result = await callImageApi(messages, apiKey, model);
+    const messages = buildImageMessages(prompt, imageSources);
+    const result = await callFlow2Api({ messages, apiKey, model, type: 'image' });
+    const media = await downloadMedia(result.mediaUrl);
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
-      imageBase64: result.imageBase64,
-      imageUrl: result.imageUrl,
+      model,
+      imageUrl: result.mediaUrl,
+      imageBase64: bufferToDataUrl(media.buffer, media.contentType),
       createdAt: new Date().toISOString()
     });
-
   } catch (error) {
-    console.error('编辑图片失败:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message || '编辑图片失败'
-    });
+    console.error('Image edit failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Image edit failed.' });
   }
 });
-
-// API 路由：检查配置状态
-app.get('/api/config/status', (req, res) => {
-  const serverApiKey = process.env.GEMINI_API_KEY;
-  res.json({
-    hasServerKey: !!serverApiKey,
-    message: serverApiKey ? '服务器已配置 API Key' : '请在前端配置 API Key'
-  });
-});
-
-// 图片代理（绕过 CORS）
-app.get('/api/proxy-image', async (req, res) => {
-  console.log('Proxy image request:', req.query.url);
-  try {
-    const { url } = req.query;
-    
-    if (!url) {
-      return res.status(400).json({ error: '缺少图片 URL' });
-    }
-
-    const imageResponse = await fetch(url);
-    if (!imageResponse.ok) {
-      return res.status(imageResponse.status).json({ error: '图片下载失败' });
-    }
-
-    const contentType = imageResponse.headers.get('content-type') || 'image/png';
-    const arrayBuffer = await imageResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.send(buffer);
-  } catch (error) {
-    console.error('图片代理失败:', error);
-    res.status(500).json({ error: '图片代理失败' });
-  }
-});
-
-app.get('/api/proxy-video', async (req, res) => {
-  try {
-    const url = req.query.url;
-    console.log('Proxy video request URL:', url);
-    
-    if (!url) {
-      return res.status(400).json({ error: '缺少视频 URL' });
-    }
-
-    const videoResponse = await fetch(url);
-    if (!videoResponse.ok) {
-      const errorText = await videoResponse.text();
-      console.error('Video fetch failed:', videoResponse.status, errorText);
-      return res.status(videoResponse.status).json({ error: '视频下载失败' });
-    }
-
-    const contentType = videoResponse.headers.get('content-type') || 'video/mp4';
-    const arrayBuffer = await videoResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    res.set('Content-Type', contentType);
-    res.set('Content-Disposition', 'attachment; filename="nano-video.mp4"');
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.send(buffer);
-  } catch (error) {
-    console.error('视频代理失败:', error);
-    res.status(500).json({ error: '视频代理失败' });
-  }
-});
-
-app.post('/api/proxy-video', async (req, res) => {
-  try {
-    const { url } = req.body;
-    
-    if (!url) {
-      return res.status(400).json({ error: '缺少视频 URL' });
-    }
-
-    const videoResponse = await fetch(url);
-    
-    if (!videoResponse.ok) {
-      const errorText = await videoResponse.text();
-      console.error('Video fetch failed:', videoResponse.status, errorText.substring(0, 200));
-      return res.status(videoResponse.status).json({ error: '视频下载失败' });
-    }
-
-    const contentType = videoResponse.headers.get('content-type') || 'video/mp4';
-    const arrayBuffer = await videoResponse.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    res.set('Content-Type', contentType);
-    res.set('Content-Disposition', 'attachment; filename="nano-video.mp4"');
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.send(buffer);
-  } catch (error) {
-    console.error('视频代理失败:', error);
-    res.status(500).json({ error: '视频代理失败' });
-  }
-});
-
-const VIDEO_MODELS = {
-  text2video: {
-    landscape: 'veo_3_1_t2v_landscape',
-    portrait: 'veo_3_1_t2v_portrait'
-  },
-  frame2video: {
-    landscape: 'veo_3_1_i2v_s_landscape',
-    portrait: 'veo_3_1_i2v_s_portrait'
-  }
-};
-
-function extractVideoUrl(text) {
-  const urlPattern = /https?:\/\/[^\s"\\)\]>']+/g;
-  const matches = text.match(urlPattern);
-  if (matches) {
-    for (const url of matches) {
-      const cleanUrl = url.replace(/["'\\>]+$/, '');
-      if (cleanUrl.match(/\.(mp4|webm)/i) || cleanUrl.includes('video') || cleanUrl.includes('videofx')) {
-        return cleanUrl;
-      }
-    }
-    return matches[0].replace(/["'\\>]+$/, '');
-  }
-  return null;
-}
-
-async function callVideoApi(messages, apiKey, model) {
-  const payload = {
-    model,
-    stream: true,
-    messages
-  };
-
-  console.log('视频 API 完整 payload:');
-  console.log('Model:', model);
-  console.log('Messages structure:', JSON.stringify(messages[0].content.map(c => ({ type: c.type, urlPrefix: c.image_url?.url?.substring(0, 80) })), null, 2));
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 300000);
-
-  let response;
-  try {
-    response = await fetch(API_BASE_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-  } catch (e) {
-    clearTimeout(timeoutId);
-    if (e.name === 'AbortError') {
-      throw new Error('请求超时，请重试');
-    }
-    throw new Error(`网络请求失败: ${e.message}`);
-  }
-  clearTimeout(timeoutId);
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`API 请求失败 (${response.status}): ${errorText}`);
-  }
-
-  const rawText = await response.text();
-  console.log('视频 API 原始响应 (前1500字符):', rawText.substring(0, 1500));
-  const { fullContent, reasoningContent, hasError, errorMessage } = parseSSEStream(rawText);
-
-  if (hasError) {
-    throw new Error(`生成失败: ${errorMessage}`);
-  }
-
-  const allContent = fullContent + ' ' + reasoningContent;
-  const videoUrl = extractVideoUrl(allContent);
-
-  if (!videoUrl) {
-    throw new Error('未能从响应中提取视频 URL');
-  }
-
-  return { videoUrl };
-}
 
 app.post('/api/generate-video', async (req, res) => {
   try {
-    const { prompt, apiKey, ratio } = req.body;
+    const prompt = ensurePrompt(req.body.prompt);
+    const ratio = req.body.ratio === 'portrait' ? 'portrait' : 'landscape';
+    const model = req.body.model || DEFAULT_VIDEO_MODELS.text2video[ratio];
+    const apiKey = withResolvedApiKey(req.body.apiKey);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: '请输入提示词' });
+      return res.status(400).json({ success: false, error: 'Prompt is required.' });
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: '请配置 API Key' });
+      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
     }
 
-    const model = VIDEO_MODELS.text2video[ratio] || VIDEO_MODELS.text2video.landscape;
-
-    const messages = [{
-      role: 'user',
-      content: [{ type: 'text', text: prompt }]
-    }];
-
-    const result = await callVideoApi(messages, apiKey, model);
+    const messages = [{ role: 'user', content: prompt }];
+    const result = await callFlow2Api({ messages, apiKey, model, type: 'video' });
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
-      videoUrl: result.videoUrl,
+      model,
+      videoUrl: result.mediaUrl,
       createdAt: new Date().toISOString()
     });
-
   } catch (error) {
-    console.error('生成视频失败:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message || '生成视频失败'
-    });
+    console.error('Text-to-video failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Text-to-video failed.' });
   }
 });
 
 app.post('/api/generate-video-from-frames', async (req, res) => {
   try {
-    const { prompt, apiKey, ratio, startFrameBase64, endFrameBase64 } = req.body;
-
-    const imageSizeKB = startFrameBase64 ? Math.round(startFrameBase64.length * 0.75 / 1024) : 0;
-    console.log('图生视频请求:', {
-      prompt,
-      ratio,
-      hasStartFrame: !!startFrameBase64,
-      imageSizeKB: imageSizeKB + ' KB',
-      startFramePrefix: startFrameBase64?.substring(0, 50),
-      hasEndFrame: !!endFrameBase64
-    });
+    const prompt = ensurePrompt(req.body.prompt);
+    const ratio = req.body.ratio === 'portrait' ? 'portrait' : 'landscape';
+    const model = req.body.model || DEFAULT_VIDEO_MODELS.frame2video[ratio];
+    const apiKey = withResolvedApiKey(req.body.apiKey);
+    const startFrameBase64 = req.body.startFrameBase64;
+    const endFrameBase64 = req.body.endFrameBase64;
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: '请输入提示词' });
+      return res.status(400).json({ success: false, error: 'Prompt is required.' });
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: '请配置 API Key' });
+      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
     }
 
     if (!startFrameBase64) {
-      return res.status(400).json({ success: false, error: '请上传起始帧图片' });
+      return res.status(400).json({ success: false, error: 'Start frame is required.' });
     }
 
-    const model = VIDEO_MODELS.frame2video[ratio] || VIDEO_MODELS.frame2video.landscape;
-    console.log('使用模型:', model);
-
-    const contentParts = [{ type: 'text', text: prompt }];
-    
-    contentParts.push({
-      type: 'image_url',
-      image_url: { url: startFrameBase64 }
-    });
-    
-    // 暂时禁用结束帧，API 可能不支持
-    // if (endFrameBase64) {
-    //   contentParts.push({
-    //     type: 'image_url',
-    //     image_url: { url: endFrameBase64 }
-    //   });
-    // }
-
-    const messages = [{
-      role: 'user',
-      content: contentParts
-    }];
-
-    const result = await callVideoApi(messages, apiKey, model);
+    const messages = buildImageMessages(prompt, [startFrameBase64, endFrameBase64].filter(Boolean));
+    const result = await callFlow2Api({ messages, apiKey, model, type: 'video' });
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
-      videoUrl: result.videoUrl,
+      model,
+      videoUrl: result.mediaUrl,
       createdAt: new Date().toISOString()
     });
-
   } catch (error) {
-    console.error('图生视频失败:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message || '图生视频失败'
-    });
+    console.error('Frame-to-video failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Frame-to-video failed.' });
   }
 });
 
-// 健康检查
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+app.post('/api/generate-video-from-references', async (req, res) => {
+  try {
+    const prompt = ensurePrompt(req.body.prompt);
+    const ratio = req.body.ratio === 'portrait' ? 'portrait' : 'landscape';
+    const model = req.body.model || DEFAULT_VIDEO_MODELS.reference2video[ratio];
+    const apiKey = withResolvedApiKey(req.body.apiKey);
+    const referenceImages = parseMaybeJsonArray(req.body.referenceImagesBase64)
+      .filter((item) => typeof item === 'string' && item.startsWith('data:image/'))
+      .slice(0, 3);
+
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: 'Prompt is required.' });
+    }
+
+    if (!apiKey) {
+      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
+    }
+
+    if (referenceImages.length === 0) {
+      return res.status(400).json({ success: false, error: 'At least one reference image is required.' });
+    }
+
+    const messages = buildImageMessages(prompt, referenceImages);
+    const result = await callFlow2Api({ messages, apiKey, model, type: 'video' });
+
+    res.json({
+      success: true,
+      id: uuidv4(),
+      prompt,
+      model,
+      videoUrl: result.mediaUrl,
+      createdAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Reference-to-video failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Reference-to-video failed.' });
+  }
 });
 
-// 静态文件（放在 API 路由之后）
+app.get('/api/proxy-image', async (req, res) => {
+  return proxyMediaRequest(req.query.url, res, 'image/png');
+});
+
+app.get('/api/proxy-video', async (req, res) => {
+  return proxyMediaRequest(req.query.url, res, 'video/mp4', 'nano-video.mp4');
+});
+
+app.post('/api/proxy-video', async (req, res) => {
+  return proxyMediaRequest(req.body.url, res, 'video/mp4', 'nano-video.mp4');
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    flow2apiBaseUrl: FLOW2API_BASE_URL
+  });
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 所有其他路由返回前端页面
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// 启动服务器
 app.listen(PORT, () => {
-  console.log(`🎨 NANO 图像生成器已启动`);
-  console.log(`📡 服务地址: http://localhost:${PORT}`);
-  console.log(`🔑 服务器 API Key: ${process.env.GEMINI_API_KEY ? '已配置' : '未配置（需在前端配置）'}`);
+  console.log(`NANO server listening on http://localhost:${PORT}`);
+  console.log(`Flow2API endpoint: ${FLOW2API_BASE_URL}`);
+  console.log(`Server API key: ${withResolvedApiKey('') ? 'configured' : 'not configured'}`);
 });
