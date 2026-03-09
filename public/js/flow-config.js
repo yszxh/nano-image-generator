@@ -24,20 +24,6 @@ const FlowConfig = {
         suffix: '',
         supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
       },
-      'gemini-3.0-pro-2k': {
-        label: 'Gemini 3.0 Pro 2K',
-        hint: 'Higher resolution output',
-        prefix: 'gemini-3.0-pro-image',
-        suffix: '-2k',
-        supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
-      },
-      'gemini-3.0-pro-4k': {
-        label: 'Gemini 3.0 Pro 4K',
-        hint: 'Highest resolution output',
-        prefix: 'gemini-3.0-pro-image',
-        suffix: '-4k',
-        supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
-      },
       'imagen-4.0-preview': {
         label: 'Imagen 4 Preview',
         hint: 'Preview model for landscape and portrait',

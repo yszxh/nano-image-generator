@@ -504,6 +504,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('resultTime').textContent = UI.formatDate(result.createdAt);
   }
 
+  function buildVideoProxyUrl(videoUrl) {
+    return `/api/proxy-video?url=${encodeURIComponent(videoUrl)}`;
+  }
+
   async function showVideoResult(result) {
     document.getElementById('resultActions').classList.remove('hidden');
     document.getElementById('continueEditBtn').classList.add('hidden');
@@ -522,17 +526,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         URL.revokeObjectURL(state.lastVideoBlobUrl);
         state.lastVideoBlobUrl = null;
       }
-      const response = await fetch('/api/proxy-video', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: result.videoUrl })
-      });
+      const proxyUrl = buildVideoProxyUrl(result.videoUrl);
+      const response = { ok: true };
+      const blobUrl = proxyUrl;
       if (!response.ok) throw new Error('视频加载失败。');
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      state.lastVideoBlobUrl = blobUrl;
       document.getElementById('resultContent').innerHTML = `
-        <video class="result-video" controls autoplay loop>
+        <video class="result-video" controls autoplay loop playsinline preload="metadata">
           <source src="${blobUrl}" type="video/mp4">
           当前浏览器不支持视频播放。
         </video>
@@ -733,21 +732,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const videoUrl = state.lastGeneratedVideo?.videoUrl;
     if (!videoUrl) return;
     try {
-      const response = await fetch('/api/proxy-video', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: videoUrl })
-      });
+      const response = { ok: true };
       if (!response.ok) throw new Error('下载失败。');
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
+      const blobUrl = buildVideoProxyUrl(videoUrl);
       const link = document.createElement('a');
       link.href = blobUrl;
       link.download = `nano-video-${Date.now()}.mp4`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(blobUrl);
+      void blobUrl;
     } catch (error) {
       UI.showToast(error.message || '视频下载失败。', 'error');
     }

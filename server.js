@@ -426,17 +426,24 @@ function buildImageMessages(prompt, imageSources = []) {
   return [{ role: 'user', content }];
 }
 
-async function proxyMediaRequest(url, res, defaultContentType, fileName) {
+async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
   const sanitizedUrl = sanitizeUrl(url);
   if (!sanitizedUrl || sanitizedUrl.startsWith('data:')) {
     return res.status(400).json({ error: 'Invalid media URL.' });
   }
 
   const { controller, timeoutId } = createAbortController();
+  const upstreamHeaders = {};
+  if (req.headers.range) {
+    upstreamHeaders.Range = req.headers.range;
+  }
 
   let upstream;
   try {
-    upstream = await fetch(sanitizedUrl, { signal: controller.signal });
+    upstream = await fetch(sanitizedUrl, {
+      signal: controller.signal,
+      headers: upstreamHeaders
+    });
   } catch (error) {
     clearAbortTimeout(timeoutId);
     const message = error.name === 'AbortError' ? 'Media proxy timed out.' : `Media proxy failed: ${error.message}`;
@@ -450,8 +457,18 @@ async function proxyMediaRequest(url, res, defaultContentType, fileName) {
     return res.status(upstream.status).json({ error: errorText });
   }
 
+  res.status(upstream.status);
   res.set('Content-Type', upstream.headers.get('content-type') || defaultContentType);
-  res.set('Cache-Control', 'public, max-age=86400');
+  res.set('Cache-Control', upstream.headers.get('cache-control') || 'public, max-age=86400');
+  if (upstream.headers.get('content-length')) {
+    res.set('Content-Length', upstream.headers.get('content-length'));
+  }
+  if (upstream.headers.get('accept-ranges')) {
+    res.set('Accept-Ranges', upstream.headers.get('accept-ranges'));
+  }
+  if (upstream.headers.get('content-range')) {
+    res.set('Content-Range', upstream.headers.get('content-range'));
+  }
   if (fileName) {
     res.set('Content-Disposition', `attachment; filename="${fileName}"`);
   }
@@ -674,15 +691,15 @@ app.post('/api/generate-video-from-references', async (req, res) => {
 });
 
 app.get('/api/proxy-image', async (req, res) => {
-  return proxyMediaRequest(req.query.url, res, 'image/png');
+  return proxyMediaRequest(req, res, req.query.url, 'image/png');
 });
 
 app.get('/api/proxy-video', async (req, res) => {
-  return proxyMediaRequest(req.query.url, res, 'video/mp4', 'nano-video.mp4');
+  return proxyMediaRequest(req, res, req.query.url, 'video/mp4', 'nano-video.mp4');
 });
 
 app.post('/api/proxy-video', async (req, res) => {
-  return proxyMediaRequest(req.body.url, res, 'video/mp4', 'nano-video.mp4');
+  return proxyMediaRequest(req, res, req.body.url, 'video/mp4', 'nano-video.mp4');
 });
 
 app.get('/api/health', (req, res) => {
@@ -697,6 +714,21 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.use((error, req, res, next) => {
+  console.error('Unhandled server error:', error);
+
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  const message = error?.message || 'Internal server error.';
+  if (req.path.startsWith('/api/')) {
+    return res.status(500).json({ success: false, error: message });
+  }
+
+  return res.status(500).type('text/plain').send(message);
 });
 
 app.listen(PORT, () => {

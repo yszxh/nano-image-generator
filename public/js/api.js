@@ -40,10 +40,15 @@ const ImageAPI = {
     }
 
     let result;
+    let responseText = '';
     try {
-      result = await response.json();
+      responseText = await response.text();
+      result = responseText ? JSON.parse(responseText) : {};
     } catch {
-      throw new Error('Server returned an invalid JSON response.');
+      const snippet = responseText
+        ? responseText.replace(/\s+/g, ' ').trim().slice(0, 160)
+        : `HTTP ${response.status}`;
+      throw new Error(`Server returned an invalid JSON response: ${snippet}`);
     }
 
     if (!response.ok || !result.success) {
