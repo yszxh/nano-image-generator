@@ -553,30 +553,32 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
       throw new Error(`Gemini API request failed: ${error.message}${error.cause ? ' | cause: ' + error.cause : ''}`);
     }
     clearAbortTimeout(timeoutId);
+
+    if (!response.ok) {
+      let errorText = '';
+      try {
+        errorText = await response.text();
+      } catch {
+        errorText = '';
+      }
+      console.log('[Gemini DEBUG] error status:', response.status, 'body:', errorText.slice(0, 800));
+
+      let errorJson;
+      try {
+        errorJson = errorText ? JSON.parse(errorText) : {};
+      } catch {
+        errorJson = {
+          error: {
+            message: errorText || '未知错误。'
+          }
+        };
+      }
+
+      const error = new Error(toFriendlyGeminiError(response.status, errorJson));
+      error.status = response.status;
+      throw error;
+    }
   });
-
-  if (!response.ok) {
-    let errorText = '';
-    try {
-      errorText = await response.text();
-    } catch {
-      errorText = '';
-    }
-    console.log('[Gemini DEBUG] error status:', response.status, 'body:', errorText.slice(0, 800));
-
-    let errorJson;
-    try {
-      errorJson = errorText ? JSON.parse(errorText) : {};
-    } catch {
-      errorJson = {
-        error: {
-          message: errorText || '未知错误。'
-        }
-      };
-    }
-
-    throw new Error(toFriendlyGeminiError(response.status, errorJson));
-  }
 
   let json;
   try {
@@ -644,12 +646,14 @@ async function callFlow2Api({ messages, apiKey, model, type }) {
       throw new Error(`Flow2API request failed: ${error.message}`);
     }
     clearAbortTimeout(timeoutId);
-  });
 
-  if (!response.ok) {
-    const errorText = await safeReadErrorText(response);
-    throw new Error(toFriendlyFlow2ApiError(response.status, model, errorText));
-  }
+    if (!response.ok) {
+      const errorText = await safeReadErrorText(response);
+      const error = new Error(toFriendlyFlow2ApiError(response.status, model, errorText));
+      error.status = response.status;
+      throw error;
+    }
+  });
 
   const rawText = await response.text();
   const parsed = parseSSEStream(rawText);
@@ -780,7 +784,8 @@ app.get('/api/config/status', (req, res) => {
   res.json({
     hasServerKey: Boolean(configuredKey),
     flow2apiBaseUrl: FLOW2API_BASE_URL,
-    message: configuredKey ? 'Server-side Flow2API key is configured.' : 'Configure Flow2API key in the browser or server environment.'
+    geminiBaseUrl: GEMINI_BASE_URL,
+    message: configuredKey ? 'Server-side API key is configured.' : 'Configure an API key in the browser or server environment.'
   });
 });
 
@@ -795,7 +800,7 @@ app.post('/api/generate', async (req, res) => {
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
+      return res.status(400).json({ success: false, error: 'Gemini API key is required.' });
     }
 
     const result = await callGeminiGenerateContent({ prompt, imageSources: [], apiKey, model });
@@ -828,7 +833,7 @@ app.post('/api/edit', upload.fields([
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
+      return res.status(400).json({ success: false, error: 'Gemini API key is required.' });
     }
 
     const imageSources = [];

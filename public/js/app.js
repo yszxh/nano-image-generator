@@ -550,7 +550,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // RESULT_RENDER
   function ensureApiKey() {
     if (state.apiKey) return true;
-    UI.showToast('请先配置 Flow2API Key。', 'warning');
+    UI.showToast('请先配置 API Key。', 'warning');
     document.getElementById('settingsBtn').click();
     return false;
   }
@@ -766,8 +766,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function initModals() {
     const settingsModal = document.getElementById('settingsModal');
     const apiKeyInput = document.getElementById('apiKeyInput');
-    const configStatus = await ImageAPI.checkConfigStatus();
-    document.getElementById('configStatusHint').textContent = configStatus.message || 'API Key 默认仅保存在当前浏览器。';
     document.getElementById('settingsBtn').addEventListener('click', () => {
       apiKeyInput.value = state.apiKey;
       UI.showModal('settingsModal');

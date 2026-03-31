@@ -64,7 +64,7 @@ const ImageAPI = {
       '/api/generate',
       { prompt, apiKey, model },
       onProgress,
-      ['Connecting to Flow2API...', 'Generating image...', 'Downloading image...', 'Image ready']
+      ['Connecting to Gemini...', 'Generating image...', 'Downloading image...', 'Image ready']
     );
   },
 
@@ -79,7 +79,7 @@ const ImageAPI = {
         referenceImagesBase64: referenceImagesBase64 ? JSON.stringify(referenceImagesBase64) : undefined
       },
       onProgress,
-      ['Connecting to Flow2API...', 'Editing image...', 'Downloading image...', 'Image ready']
+      ['Connecting to Gemini...', 'Editing image...', 'Downloading image...', 'Image ready']
     );
   },
 
