@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import http from 'http';
+import https from 'https';
 import multer from 'multer';
 import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
@@ -92,14 +94,67 @@ function clearAbortTimeout(timeoutId) {
   }
 }
 
+function downloadBinaryUrl(url, timeoutMs = REQUEST_TIMEOUT_MS, redirectsLeft = 3) {
+  return new Promise((resolve, reject) => {
+    const sanitizedUrl = sanitizeUrl(url);
+    if (!sanitizedUrl || sanitizedUrl.startsWith('data:')) {
+      reject(new Error('Invalid remote media URL.'));
+      return;
+    }
+
+    const parsedUrl = new URL(sanitizedUrl);
+    const transport = parsedUrl.protocol === 'https:' ? https : http;
+    const request = transport.get(parsedUrl, {
+      headers: {
+        'Connection': 'close',
+        'User-Agent': 'nano-image-generator/1.0'
+      }
+    }, (response) => {
+      const statusCode = response.statusCode || 0;
+
+      if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location && redirectsLeft > 0) {
+        response.resume();
+        resolve(downloadBinaryUrl(response.headers.location, timeoutMs, redirectsLeft - 1));
+        return;
+      }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        response.resume();
+        reject(new Error(`Image download failed (${statusCode})`));
+        return;
+      }
+
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        resolve({
+          buffer: Buffer.concat(chunks),
+          contentType: response.headers['content-type'] || 'image/png'
+        });
+      });
+    });
+
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(new Error('Image download timed out.'));
+    });
+
+    request.on('error', (error) => {
+      reject(error);
+    });
+  });
+}
+
 /**
  * 对异步操作做指数退避重试。
  * 仅重试网络/超时类错误，业务错误（4xx、内容过滤）直接抛出。
  */
-async function withRetry(fn, maxRetries = PROXY_MAX_RETRIES) {
+async function withRetry(fn, maxRetries = PROXY_MAX_RETRIES, retryState = null) {
   let lastError;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
+      if (retryState) {
+        retryState.attempts = attempt + 1;
+      }
       return await fn();
     } catch (err) {
       lastError = err;
@@ -360,29 +415,135 @@ function parseUpstreamError(errorText) {
   return null;
 }
 
-function toFriendlyFlow2ApiError(status, model, errorText) {
+function toDataUrlFromUpload(file) {
+  const mimeType = file?.mimetype || getMimeType(file?.originalname || '');
+  return `data:${mimeType};base64,${file.buffer.toString('base64')}`;
+}
+
+function logRequestTelemetry({ requestId, route, model, status, code = 'ok', retryable = false, retryCount = 0, totalMs, extra = {} }) {
+  console.log('[Telemetry]', JSON.stringify({
+    requestId,
+    route,
+    model,
+    status,
+    code,
+    retryable,
+    retryCount,
+    totalMs,
+    ...extra
+  }));
+}
+
+function createAppError(message, { status = 500, code = 'internal_error', retryable = false, details } = {}) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  error.retryable = retryable;
+  if (details) {
+    error.details = details;
+  }
+  return error;
+}
+
+function sendAppError(res, error, fallbackMessage) {
+  const status = Number.isInteger(error?.status) ? error.status : 500;
+  res.status(status).json({
+    success: false,
+    error: error?.message || fallbackMessage,
+    code: error?.code || 'internal_error',
+    status,
+    retryable: Boolean(error?.retryable)
+  });
+}
+
+function getContentType(response) {
+  return (response?.headers?.get('content-type') || '').toLowerCase();
+}
+
+function isJsonContentType(contentType) {
+  return contentType.includes('application/json') || contentType.includes('+json');
+}
+
+function isHtmlContentType(contentType) {
+  return contentType.includes('text/html') || contentType.includes('application/xhtml+xml');
+}
+
+function isSseContentType(contentType) {
+  return contentType.includes('text/event-stream') || contentType.includes('text/plain');
+}
+
+function isExpectedMediaContentType(contentType, defaultContentType) {
+  if (!contentType) return true;
+  if (defaultContentType.startsWith('image/')) {
+    return contentType.startsWith('image/');
+  }
+  if (defaultContentType.startsWith('video/')) {
+    return contentType.startsWith('video/') || contentType === 'application/octet-stream';
+  }
+  return true;
+}
+
+function resolveImageAspectRatio(ratio, model) {
+  if (typeof ratio === 'string' && RATIO_MAP[ratio]) {
+    return RATIO_MAP[ratio];
+  }
+  const normalizedModel = typeof model === 'string' ? model.trim() : '';
+  const ratioMatch = normalizedModel.replace(/-(\d+k)$/i, '').match(/-(portrait|landscape|square|four-three|three-four)$/i);
+  const ratioKey = ratioMatch ? ratioMatch[1].toLowerCase() : 'landscape';
+  return RATIO_MAP[ratioKey] || '16:9';
+}
+
+function classifyFlow2ApiError(status, model, errorText) {
   const parsed = parseUpstreamError(errorText);
   const rawMessage = parsed?.message || errorText || '';
   const errorCode = (parsed?.code || '').toLowerCase();
   const lowerMessage = rawMessage.toLowerCase();
 
   if (status === 401 || status === 403 || /invalid api key|invalid token|unauthorized|authentication|bearer/i.test(rawMessage)) {
-    return 'Flow2API key 无效或已过期，请重新填写。';
+    return {
+      message: 'Flow2API key 无效或已过期，请重新填写。',
+      code: 'invalid_api_key',
+      retryable: false
+    };
   }
 
   if (errorCode === 'model_not_found' || /no available channel for model|model_not_found|model not found/i.test(lowerMessage)) {
-    return `当前上游渠道不可用模型 ${model}。这通常是 API Key/渠道不匹配，或该渠道暂未开通这个模型。`;
+    return {
+      message: `当前上游渠道不可用模型 ${model}。这通常是 API Key/渠道不匹配，或该渠道暂未开通这个模型。`,
+      code: 'model_not_found',
+      retryable: false
+    };
   }
 
   if (status === 429 || /rate limit|too many requests|quota|credits/i.test(lowerMessage)) {
-    return 'Flow2API 当前已限流或额度不足，请稍后重试或检查账户额度。';
+    return {
+      message: 'Flow2API 当前已限流或额度不足，请稍后重试或检查账户额度。',
+      code: 'upstream_rate_limited',
+      retryable: true
+    };
+  }
+
+  if (/unusual activity|recaptcha evaluation failed|captcha/i.test(lowerMessage)) {
+    return {
+      message: `Flow2API 将当前请求判定为异常活动：${rawMessage}`,
+      code: 'upstream_unusual_activity',
+      retryable: true
+    };
   }
 
   if (status >= 500) {
-    return `Flow2API 上游暂时不可用 (${status})：${rawMessage || '请稍后重试。'}`;
+    return {
+      message: `Flow2API 上游暂时不可用 (${status})：${rawMessage || '请稍后重试。'}`,
+      code: 'upstream_unavailable',
+      retryable: true
+    };
   }
 
-  return `Flow2API 请求失败 (${status})：${rawMessage || '未知错误。'}`;
+  return {
+    message: `Flow2API 请求失败 (${status})：${rawMessage || '未知错误。'}`,
+    code: errorCode || 'upstream_request_failed',
+    retryable: false
+  };
 }
 
 function extractModelBase(model) {
@@ -459,7 +620,7 @@ function parseGeminiImageResponse(json) {
   throw new Error('Gemini API did not return an image.');
 }
 
-function toFriendlyGeminiError(status, errorJson) {
+function classifyGeminiError(status, errorJson) {
   const rawMessage = errorJson?.error?.message || errorJson?.error?.status || '未知错误。';
   const errorStatus = (errorJson?.error?.status || '').toLowerCase();
   const lowerMessage = rawMessage.toLowerCase();
@@ -470,7 +631,11 @@ function toFriendlyGeminiError(status, errorJson) {
     || errorStatus === 'permission_denied'
     || /invalid api key|api key not valid|unauthorized|authentication|forbidden|permission denied/i.test(lowerMessage)
   ) {
-    return 'Gemini API key 无效或已过期，请重新填写。';
+    return {
+      message: 'Gemini API key 无效或已过期，请重新填写。',
+      code: 'invalid_api_key',
+      retryable: false
+    };
   }
 
   if (
@@ -478,7 +643,11 @@ function toFriendlyGeminiError(status, errorJson) {
     || errorStatus === 'not_found'
     || /model.*not found|not found/i.test(lowerMessage)
   ) {
-    return `Gemini API 模型或接口地址不可用 (${status})：${rawMessage}`;
+    return {
+      message: `Gemini API 模型或接口地址不可用 (${status})：${rawMessage}`,
+      code: 'model_not_found',
+      retryable: false
+    };
   }
 
   if (
@@ -486,14 +655,34 @@ function toFriendlyGeminiError(status, errorJson) {
     || errorStatus === 'resource_exhausted'
     || /rate limit|too many requests|quota|credits|resource exhausted/i.test(lowerMessage)
   ) {
-    return 'Gemini API 当前已限流或额度不足，请稍后重试。';
+    return {
+      message: 'Gemini API 当前已限流或额度不足，请稍后重试。',
+      code: 'upstream_rate_limited',
+      retryable: true
+    };
+  }
+
+  if (/unusual activity|recaptcha evaluation failed|captcha/i.test(lowerMessage)) {
+    return {
+      message: `Gemini API 将当前请求判定为异常活动：${rawMessage}`,
+      code: 'upstream_unusual_activity',
+      retryable: true
+    };
   }
 
   if (status >= 500) {
-    return `Gemini API 上游暂时不可用 (${status})：${rawMessage}`;
+    return {
+      message: `Gemini API 上游暂时不可用 (${status})：${rawMessage}`,
+      code: 'upstream_unavailable',
+      retryable: true
+    };
   }
 
-  return `Gemini API 请求失败 (${status})：${rawMessage}`;
+  return {
+    message: `Gemini API 请求失败 (${status})：${rawMessage}`,
+    code: errorStatus || 'upstream_request_failed',
+    retryable: false
+  };
 }
 
 async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio, imageSize, prompt, imageSources = [] }) {
@@ -507,31 +696,38 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
     throw new Error('Gemini model is required.');
   }
 
-  const ratioMatch = fullModel.replace(/-(\d+k)$/i, '').match(/-(portrait|landscape|square|four-three|three-four)$/i);
-  const ratioKey = ratioMatch ? ratioMatch[1].toLowerCase() : 'landscape';
   const imageConfig = {
-    aspectRatio: aspectRatio || RATIO_MAP[ratioKey] || '16:9'
+    aspectRatio: aspectRatio || resolveImageAspectRatio(null, fullModel)
   };
 
-  if (imageSize === '2K') {
-    imageConfig.imageSize = '2K';
-  }
+  imageConfig.imageSize = imageSize || '1K';
+
+  const isPreviewModel = fullModel === 'gemini-3.1-flash-image-preview';
 
   const requestContents = Array.isArray(contents) && contents.length
     ? contents
     : buildGeminiImageContents(prompt, imageSources);
 
   const payload = {
-    systemInstruction: {
-      parts: [{ text: 'Return an image only.' }]
-    },
     contents: requestContents,
     generationConfig: {
-      responseModalities: ['IMAGE']
+      responseModalities: isPreviewModel ? ['IMAGE', 'TEXT'] : ['IMAGE'],
+      imageConfig
     }
   };
 
+  if (!isPreviewModel) {
+    payload.systemInstruction = {
+      parts: [{ text: 'Return an image only.' }]
+    };
+  } else {
+    payload.generationConfig.thinkingConfig = {
+      thinkingLevel: 'MINIMAL'
+    };
+  }
+
   let response;
+  const retryState = { attempts: 0 };
   await withRetry(async () => {
     const { controller, timeoutId } = createAbortController();
     try {
@@ -539,7 +735,7 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${resolvedApiKey}`,
+          'x-goog-api-key': resolvedApiKey,
           'Connection': 'close'
         },
         body: JSON.stringify(payload),
@@ -574,11 +770,35 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
         };
       }
 
-      const error = new Error(toFriendlyGeminiError(response.status, errorJson));
-      error.status = response.status;
-      throw error;
+      const classified = classifyGeminiError(response.status, errorJson);
+      throw createAppError(classified.message, {
+        status: response.status,
+        code: classified.code,
+        retryable: classified.retryable,
+        details: { errorJson, retryCount: Math.max(0, retryState.attempts - 1) }
+      });
     }
-  });
+  }, PROXY_MAX_RETRIES, retryState);
+
+  const responseContentType = getContentType(response);
+  if (isHtmlContentType(responseContentType)) {
+    const htmlText = await safeReadErrorText(response);
+    throw createAppError('Gemini 接口返回了 HTML 页面而不是 JSON，通常表示上游网关返回了挑战页或错误页面。', {
+      status: 502,
+      code: 'html_response_instead_of_json',
+      retryable: true,
+      details: { snippet: htmlText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
+  if (!isJsonContentType(responseContentType)) {
+    const bodyText = await safeReadErrorText(response);
+    throw createAppError(`Gemini 接口返回了意外的内容类型：${responseContentType || 'unknown'}`, {
+      status: 502,
+      code: 'unexpected_content_type',
+      retryable: true,
+      details: { snippet: bodyText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
 
   let json;
   try {
@@ -591,26 +811,14 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
   const parsed = parseGeminiImageResponse(json);
 
   if (parsed.type === 'base64') {
-    return { imageBase64: `data:${parsed.mimeType};base64,${parsed.data}` };
+    return { imageBase64: `data:${parsed.mimeType};base64,${parsed.data}`, imageUrl: null, retryCount: Math.max(0, retryState.attempts - 1) };
   }
 
-  // type === 'url': download and convert to base64
-  const { controller: dlController, timeoutId: dlTimeoutId } = createAbortController();
-  let dlResponse;
-  try {
-    dlResponse = await fetch(parsed.url, { signal: dlController.signal, headers: { 'Connection': 'close' } });
-  } catch (err) {
-    clearAbortTimeout(dlTimeoutId);
-    throw new Error(`Image download failed: ${err.message}`);
-  }
-  clearAbortTimeout(dlTimeoutId);
-  if (!dlResponse.ok) {
-    throw new Error(`Image download failed (${dlResponse.status})`);
-  }
-  const arrayBuffer = await dlResponse.arrayBuffer();
-  const contentType = dlResponse.headers.get('content-type') || 'image/png';
-  const base64 = Buffer.from(arrayBuffer).toString('base64');
-  return { imageBase64: `data:${contentType};base64,${base64}` };
+  return {
+    imageBase64: null,
+    imageUrl: `/api/proxy-image?url=${encodeURIComponent(parsed.url)}`,
+    retryCount: Math.max(0, retryState.attempts - 1)
+  };
 }
 
 async function callFlow2Api({ messages, apiKey, model, type }) {
@@ -626,6 +834,7 @@ async function callFlow2Api({ messages, apiKey, model, type }) {
   };
 
   let response;
+  const retryState = { attempts: 0 };
   await withRetry(async () => {
     const { controller, timeoutId } = createAbortController();
     try {
@@ -649,28 +858,63 @@ async function callFlow2Api({ messages, apiKey, model, type }) {
 
     if (!response.ok) {
       const errorText = await safeReadErrorText(response);
-      const error = new Error(toFriendlyFlow2ApiError(response.status, model, errorText));
-      error.status = response.status;
-      throw error;
+      const classified = classifyFlow2ApiError(response.status, model, errorText);
+      throw createAppError(classified.message, {
+        status: response.status,
+        code: classified.code,
+        retryable: classified.retryable,
+        details: { upstream: parseUpstreamError(errorText), retryCount: Math.max(0, retryState.attempts - 1) }
+      });
     }
-  });
+  }, PROXY_MAX_RETRIES, retryState);
+
+  const responseContentType = getContentType(response);
+  if (isHtmlContentType(responseContentType)) {
+    const htmlText = await safeReadErrorText(response);
+    throw createAppError('Flow2API 返回了 HTML 页面而不是事件流，通常表示网关挑战页或前台页面被命中。', {
+      status: 502,
+      code: 'html_response_instead_of_sse',
+      retryable: true,
+      details: { snippet: htmlText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
+  if (!isSseContentType(responseContentType)) {
+    const bodyText = await safeReadErrorText(response);
+    throw createAppError(`Flow2API 返回了意外的内容类型：${responseContentType || 'unknown'}`, {
+      status: 502,
+      code: 'unexpected_content_type',
+      retryable: true,
+      details: { snippet: bodyText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
 
   const rawText = await response.text();
   const parsed = parseSSEStream(rawText);
 
   if (parsed.errorMessage) {
-    throw new Error(parsed.errorMessage);
+    throw createAppError(parsed.errorMessage, {
+      status: 502,
+      code: 'upstream_sse_error',
+      retryable: true,
+      details: { retryCount: Math.max(0, retryState.attempts - 1) }
+    });
   }
 
   const mediaUrl = pickMediaUrl(parsed, type);
   if (!mediaUrl) {
-    throw new Error(`Unable to extract ${type} URL from Flow2API response.`);
+    throw createAppError(`Unable to extract ${type} URL from Flow2API response.`, {
+      status: 502,
+      code: 'media_url_missing',
+      retryable: true,
+      details: { retryCount: Math.max(0, retryState.attempts - 1) }
+    });
   }
 
   return {
     mediaUrl,
     rawText,
-    parsed
+    parsed,
+    retryCount: Math.max(0, retryState.attempts - 1)
   };
 }
 
@@ -743,6 +987,16 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
     return res.status(upstream.status).json({ error: errorText });
   }
 
+  const upstreamContentType = getContentType(upstream);
+  if (!isExpectedMediaContentType(upstreamContentType, defaultContentType)) {
+    const errorText = await safeReadErrorText(upstream);
+    return res.status(502).json({
+      error: `Unexpected upstream content type: ${upstreamContentType || 'unknown'}`,
+      code: isHtmlContentType(upstreamContentType) ? 'html_response_instead_of_media' : 'unexpected_content_type',
+      details: errorText
+    });
+  }
+
   res.status(upstream.status);
   res.set('Content-Type', upstream.headers.get('content-type') || defaultContentType);
   res.set('Cache-Control', upstream.headers.get('cache-control') || 'public, max-age=86400');
@@ -790,32 +1044,38 @@ app.get('/api/config/status', (req, res) => {
 });
 
 app.post('/api/generate', async (req, res) => {
+  const requestId = uuidv4();
+  const startedAt = Date.now();
   try {
     const prompt = ensurePrompt(req.body.prompt);
     const model = req.body.model || DEFAULT_IMAGE_MODEL;
+    const aspectRatio = resolveImageAspectRatio(req.body.ratio, model);
     const apiKey = withResolvedApiKey(req.body.apiKey, req);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: 'Prompt is required.' });
+      return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Image generation failed.');
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Gemini API key is required.' });
+      return sendAppError(res, createAppError('Gemini API key is required.', { status: 400, code: 'api_key_required' }), 'Image generation failed.');
     }
 
-    const result = await callGeminiGenerateContent({ prompt, imageSources: [], apiKey, model });
+    const result = await callGeminiGenerateContent({ prompt, imageSources: [], apiKey, model, aspectRatio });
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
       model,
-      imageBase64: result.imageBase64,
+      imageBase64: result.imageBase64 || null,
+      imageUrl: result.imageUrl || null,
       createdAt: new Date().toISOString()
     });
+    logRequestTelemetry({ requestId, route: '/api/generate', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt });
   } catch (error) {
     console.error('Image generation failed:', error);
-    res.status(500).json({ success: false, error: error.message || 'Image generation failed.' });
+    logRequestTelemetry({ requestId, route: '/api/generate', model: req.body.model || DEFAULT_IMAGE_MODEL, status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
+    sendAppError(res, error, 'Image generation failed.');
   }
 });
 
@@ -823,17 +1083,20 @@ app.post('/api/edit', upload.fields([
   { name: 'mainImage', maxCount: 1 },
   { name: 'referenceImages', maxCount: 5 }
 ]), async (req, res) => {
+  const requestId = uuidv4();
+  const startedAt = Date.now();
   try {
     const prompt = ensurePrompt(req.body.prompt);
     const model = req.body.model || DEFAULT_IMAGE_MODEL;
+    const aspectRatio = resolveImageAspectRatio(req.body.ratio, model);
     const apiKey = withResolvedApiKey(req.body.apiKey, req);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: 'Prompt is required.' });
+      return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Image edit failed.');
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Gemini API key is required.' });
+      return sendAppError(res, createAppError('Gemini API key is required.', { status: 400, code: 'api_key_required' }), 'Image edit failed.');
     }
 
     const imageSources = [];
@@ -841,16 +1104,15 @@ app.post('/api/edit', upload.fields([
     if (req.body.mainImageBase64) {
       imageSources.push(req.body.mainImageBase64);
     } else if (req.files?.mainImage?.[0]) {
-      const mainImage = req.files.mainImage[0];
-      imageSources.push(`data:${getMimeType(mainImage.originalname)};base64,${mainImage.buffer.toString('base64')}`);
+      imageSources.push(toDataUrlFromUpload(req.files.mainImage[0]));
     }
 
     if (imageSources.length === 0) {
-      return res.status(400).json({ success: false, error: 'Main image is required.' });
+      return sendAppError(res, createAppError('Main image is required.', { status: 400, code: 'main_image_required' }), 'Image edit failed.');
     }
 
     for (const refImage of req.files?.referenceImages || []) {
-      imageSources.push(`data:${getMimeType(refImage.originalname)};base64,${refImage.buffer.toString('base64')}`);
+      imageSources.push(toDataUrlFromUpload(refImage));
     }
 
     for (const refBase64 of parseMaybeJsonArray(req.body.referenceImagesBase64)) {
@@ -859,23 +1121,28 @@ app.post('/api/edit', upload.fields([
       }
     }
 
-    const result = await callGeminiGenerateContent({ prompt, imageSources, apiKey, model });
+    const result = await callGeminiGenerateContent({ prompt, imageSources, apiKey, model, aspectRatio });
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
       model,
-      imageBase64: result.imageBase64,
+      imageBase64: result.imageBase64 || null,
+      imageUrl: result.imageUrl || null,
       createdAt: new Date().toISOString()
     });
+    logRequestTelemetry({ requestId, route: '/api/edit', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { inputImageCount: imageSources.length } });
   } catch (error) {
     console.error('Image edit failed:', error);
-    res.status(500).json({ success: false, error: error.message || 'Image edit failed.' });
+    logRequestTelemetry({ requestId, route: '/api/edit', model: req.body.model || DEFAULT_IMAGE_MODEL, status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
+    sendAppError(res, error, 'Image edit failed.');
   }
 });
 
 app.post('/api/generate-video', async (req, res) => {
+  const requestId = uuidv4();
+  const startedAt = Date.now();
   try {
     const prompt = ensurePrompt(req.body.prompt);
     const ratio = req.body.ratio === 'portrait' ? 'portrait' : 'landscape';
@@ -883,11 +1150,11 @@ app.post('/api/generate-video', async (req, res) => {
     const apiKey = withResolvedApiKey(req.body.apiKey, req);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: 'Prompt is required.' });
+      return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Text-to-video failed.');
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
+      return sendAppError(res, createAppError('Flow2API key is required.', { status: 400, code: 'api_key_required' }), 'Text-to-video failed.');
     }
 
     const messages = [{ role: 'user', content: prompt }];
@@ -901,31 +1168,38 @@ app.post('/api/generate-video', async (req, res) => {
       videoUrl: result.mediaUrl,
       createdAt: new Date().toISOString()
     });
+    logRequestTelemetry({ requestId, route: '/api/generate-video', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt });
   } catch (error) {
     console.error('Text-to-video failed:', error);
-    res.status(500).json({ success: false, error: error.message || 'Text-to-video failed.' });
+    logRequestTelemetry({ requestId, route: '/api/generate-video', model: req.body.model || DEFAULT_VIDEO_MODELS.text2video[req.body.ratio === 'portrait' ? 'portrait' : 'landscape'], status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
+    sendAppError(res, error, 'Text-to-video failed.');
   }
 });
 
-app.post('/api/generate-video-from-frames', async (req, res) => {
+app.post('/api/generate-video-from-frames', upload.fields([
+  { name: 'startFrame', maxCount: 1 },
+  { name: 'endFrame', maxCount: 1 }
+]), async (req, res) => {
+  const requestId = uuidv4();
+  const startedAt = Date.now();
   try {
     const prompt = ensurePrompt(req.body.prompt);
     const ratio = req.body.ratio === 'portrait' ? 'portrait' : 'landscape';
     const model = req.body.model || DEFAULT_VIDEO_MODELS.frame2video[ratio];
     const apiKey = withResolvedApiKey(req.body.apiKey, req);
-    const startFrameBase64 = req.body.startFrameBase64;
-    const endFrameBase64 = req.body.endFrameBase64;
+    const startFrameBase64 = req.body.startFrameBase64 || (req.files?.startFrame?.[0] ? toDataUrlFromUpload(req.files.startFrame[0]) : null);
+    const endFrameBase64 = req.body.endFrameBase64 || (req.files?.endFrame?.[0] ? toDataUrlFromUpload(req.files.endFrame[0]) : null);
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: 'Prompt is required.' });
+      return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Frame-to-video failed.');
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
+      return sendAppError(res, createAppError('Flow2API key is required.', { status: 400, code: 'api_key_required' }), 'Frame-to-video failed.');
     }
 
     if (!startFrameBase64) {
-      return res.status(400).json({ success: false, error: 'Start frame is required.' });
+      return sendAppError(res, createAppError('Start frame is required.', { status: 400, code: 'start_frame_required' }), 'Frame-to-video failed.');
     }
 
     const messages = buildImageMessages(prompt, [startFrameBase64, endFrameBase64].filter(Boolean));
@@ -939,13 +1213,19 @@ app.post('/api/generate-video-from-frames', async (req, res) => {
       videoUrl: result.mediaUrl,
       createdAt: new Date().toISOString()
     });
+    logRequestTelemetry({ requestId, route: '/api/generate-video-from-frames', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { hasEndFrame: Boolean(endFrameBase64) } });
   } catch (error) {
     console.error('Frame-to-video failed:', error);
-    res.status(500).json({ success: false, error: error.message || 'Frame-to-video failed.' });
+    logRequestTelemetry({ requestId, route: '/api/generate-video-from-frames', model: req.body.model || DEFAULT_VIDEO_MODELS.frame2video[req.body.ratio === 'portrait' ? 'portrait' : 'landscape'], status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
+    sendAppError(res, error, 'Frame-to-video failed.');
   }
 });
 
-app.post('/api/generate-video-from-references', async (req, res) => {
+app.post('/api/generate-video-from-references', upload.fields([
+  { name: 'referenceImages', maxCount: 3 }
+]), async (req, res) => {
+  const requestId = uuidv4();
+  const startedAt = Date.now();
   try {
     const prompt = ensurePrompt(req.body.prompt);
     const ratio = req.body.ratio === 'portrait' ? 'portrait' : 'landscape';
@@ -954,17 +1234,21 @@ app.post('/api/generate-video-from-references', async (req, res) => {
     const referenceImages = parseMaybeJsonArray(req.body.referenceImagesBase64)
       .filter((item) => typeof item === 'string' && item.startsWith('data:image/'))
       .slice(0, 3);
+    for (const refImage of req.files?.referenceImages || []) {
+      if (referenceImages.length >= 3) break;
+      referenceImages.push(toDataUrlFromUpload(refImage));
+    }
 
     if (!prompt) {
-      return res.status(400).json({ success: false, error: 'Prompt is required.' });
+      return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Reference-to-video failed.');
     }
 
     if (!apiKey) {
-      return res.status(400).json({ success: false, error: 'Flow2API key is required.' });
+      return sendAppError(res, createAppError('Flow2API key is required.', { status: 400, code: 'api_key_required' }), 'Reference-to-video failed.');
     }
 
     if (referenceImages.length === 0) {
-      return res.status(400).json({ success: false, error: 'At least one reference image is required.' });
+      return sendAppError(res, createAppError('At least one reference image is required.', { status: 400, code: 'reference_images_required' }), 'Reference-to-video failed.');
     }
 
     const messages = buildImageMessages(prompt, referenceImages);
@@ -978,9 +1262,11 @@ app.post('/api/generate-video-from-references', async (req, res) => {
       videoUrl: result.mediaUrl,
       createdAt: new Date().toISOString()
     });
+    logRequestTelemetry({ requestId, route: '/api/generate-video-from-references', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { referenceCount: referenceImages.length } });
   } catch (error) {
     console.error('Reference-to-video failed:', error);
-    res.status(500).json({ success: false, error: error.message || 'Reference-to-video failed.' });
+    logRequestTelemetry({ requestId, route: '/api/generate-video-from-references', model: req.body.model || DEFAULT_VIDEO_MODELS.reference2video[req.body.ratio === 'portrait' ? 'portrait' : 'landscape'], status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
+    sendAppError(res, error, 'Reference-to-video failed.');
   }
 });
 
