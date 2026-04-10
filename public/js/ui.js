@@ -57,6 +57,15 @@ const UI = {
     document.body.removeChild(link);
   },
 
+  downloadUrl(url, filename = 'generated-image.png') {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  },
+
   formatDate(dateString) {
     const date = new Date(dateString);
     return date.toLocaleString('zh-CN', {
