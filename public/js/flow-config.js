@@ -17,6 +17,14 @@ const FlowConfig = {
         suffix: '',
         supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
       },
+      'gemini-3.1-flash-preview': {
+        label: '（官方）gemini-3.1-flash-image-preview',
+        hint: 'Official preview image model with arbitrary ratio support',
+        prefix: 'gemini-3.1-flash-image-preview',
+        suffix: '',
+        exactModel: true,
+        supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
+      },
       'gemini-3.0-pro': {
         label: 'Gemini 3.0 Pro',
         hint: 'Balanced quality model',
@@ -97,6 +105,9 @@ const FlowConfig = {
 
   buildImageModel(versionId, ratio) {
     const version = this.image.versions[versionId] || this.image.versions[this.image.defaultVersion];
+    if (version.exactModel) {
+      return version.prefix;
+    }
     const finalRatio = version.supportedRatios.includes(ratio) ? ratio : version.supportedRatios[0];
     return `${version.prefix}-${finalRatio}${version.suffix}`;
   },

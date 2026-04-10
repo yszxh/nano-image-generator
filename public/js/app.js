@@ -23,8 +23,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const TaskManager = {
     MAX_TASKS: 6,
-    tasks: [],
+    MAX_RUNNING_IMAGE: 2,
+    MAX_RUNNING_VIDEO: 1,
+    tasks: JSON.parse(localStorage.getItem('nano_tasks') || '[]'),
     activeTaskId: null,
+    getTaskKind(type) {
+      return type === 'text2img' || type === 'img2img' ? 'image' : 'video';
+    },
+    getRunningLimit(type) {
+      return this.getTaskKind(type) === 'image' ? this.MAX_RUNNING_IMAGE : this.MAX_RUNNING_VIDEO;
+    },
+    getRunningCount(type) {
+      const kind = this.getTaskKind(type);
+      return this.tasks.filter((task) => this.getTaskKind(task.type) === kind && task.status === 'running').length;
+    },
     canAddTask() {
       return this.tasks.length < this.MAX_TASKS;
     },
@@ -37,22 +49,70 @@ document.addEventListener('DOMContentLoaded', async () => {
         id: Date.now().toString(),
         type: config.type,
         prompt: config.prompt,
-        status: 'running',
+        status: 'queued',
         progress: 0,
         result: null,
         createdAt: new Date().toISOString()
       };
       this.tasks.unshift(task);
-      this.activeTaskId = task.id;
-      showProgressResult();
+      this.activeTaskId = this.activeTaskId || task.id;
+      this.save();
       this.render();
       this.updateCount();
       return task;
+    },
+    startTask(task) {
+      task.status = 'running';
+      this.activeTaskId = task.id;
+      if (this.getTaskKind(task.type) === 'image') {
+        showProgressResult();
+      } else {
+        showVideoProgressResult();
+      }
+      this.save();
+      this.render();
+      this.updateCount();
+    },
+    async runTask(config, worker) {
+      const task = this.addTask(config);
+      if (!task) return null;
+      return await new Promise((resolve, reject) => {
+        task.worker = worker;
+        task.resolve = resolve;
+        task.reject = reject;
+        this.pumpQueue();
+      });
+    },
+    pumpQueue() {
+      const queuedTasks = [...this.tasks]
+        .filter((task) => task.status === 'queued' && typeof task.worker === 'function')
+        .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+      for (const task of queuedTasks) {
+        if (this.getRunningCount(task.type) >= this.getRunningLimit(task.type)) {
+          continue;
+        }
+        this.startTask(task);
+        Promise.resolve()
+          .then(() => task.worker(task))
+          .then((result) => task.resolve?.(result))
+          .catch((error) => task.reject?.(error))
+          .finally(() => {
+            delete task.worker;
+            delete task.resolve;
+            delete task.reject;
+            this.save();
+            this.render();
+            this.updateCount();
+            this.pumpQueue();
+          });
+      }
     },
     updateTask(id, updates) {
       const task = this.tasks.find((item) => item.id === id);
       if (!task) return;
       Object.assign(task, updates);
+      this.save();
       this.render();
     },
     removeTask(id) {
@@ -60,8 +120,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (this.activeTaskId === id) {
         this.activeTaskId = this.tasks[0]?.id || null;
       }
+      this.save();
       this.render();
       this.updateCount();
+    },
+    save() {
+      // 仅持久化基本信息，不持久化巨大的结果数据以节省 storage 空间
+      const tasksToSave = this.tasks.map(t => ({
+        ...t,
+        result: t.status === 'completed' ? { ...t.result, imageBase64: null, imageUrl: t.result?.imageUrl || null } : t.result
+      })).slice(0, 10);
+      localStorage.setItem('nano_tasks', JSON.stringify(tasksToSave));
     },
     setActive(id) {
       this.activeTaskId = id;
@@ -105,6 +174,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       reference2video: '多图视频'
     };
     const statusLabels = {
+      queued: '排队中',
       running: '进行中',
       completed: '已完成',
       failed: '失败'
@@ -325,6 +395,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (input) input.value = '';
   }
 
+  function getImageSource(item) {
+    return item?.imageUrl || item?.imageBase64 || '';
+  }
+
+  async function urlToDataUrl(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error('图片加载失败。');
+    }
+    const blob = await response.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('图片读取失败。'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
   function setupDropZone(zone, input, onFiles) {
     zone.addEventListener('click', () => input.click());
     input.addEventListener('change', (event) => {
@@ -342,8 +430,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const historyId = event.dataTransfer.getData('application/x-history-image');
       if (historyId) {
         const item = HistoryManager.getById(historyId);
-        if (item?.imageBase64) {
-          onFiles([{ historyBase64: item.imageBase64 }]);
+        const imageSource = getImageSource(item);
+        if (imageSource) {
+          onFiles([{ historyBase64: item.imageBase64 || null, historyUrl: item.imageUrl || null }]);
           return;
         }
       }
@@ -353,7 +442,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function fileOrHistoryToBase64(item) {
-    return item.historyBase64 || UI.fileToBase64(item);
+    if (item.historyBase64) return item.historyBase64;
+    if (item.historyUrl) return urlToDataUrl(item.historyUrl);
+    return UI.fileToBase64(item);
   }
 
   function renderReferencePreviews(containerId, images, onRemove) {
@@ -496,7 +587,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       URL.revokeObjectURL(state.lastVideoBlobUrl);
       state.lastVideoBlobUrl = null;
     }
-    document.getElementById('resultContent').innerHTML = `<img class="result-image" src="${result.imageBase64}" alt="generated image">`;
+    document.getElementById('resultContent').innerHTML = `<img class="result-image" src="${getImageSource(result)}" alt="generated image">`;
     document.getElementById('resultActions').classList.remove('hidden');
     document.getElementById('continueEditBtn').classList.remove('hidden');
     document.getElementById('generateVideoFromImageBtn').classList.remove('hidden');
@@ -562,25 +653,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     if (!ensureApiKey()) return;
-    const task = TaskManager.addTask({ type: 'text2img', prompt });
-    if (!task) return;
-    try {
-      const result = await ImageAPI.generateImage(prompt, state.apiKey, getImageModel(), (progress) => {
-        TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
-        if (TaskManager.activeTaskId === task.id) updateProgress(progress);
-      });
-      TaskManager.updateTask(task.id, { status: 'completed', result });
-      state.lastGeneratedImage = result;
-      state.lastGeneratedVideo = null;
-      HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, mediaType: 'image', type: 'generate', createdAt: result.createdAt });
-      if (TaskManager.activeTaskId === task.id) showResult(result);
-      renderHistory();
-      UI.showToast('图片生成成功。', 'success');
-    } catch (error) {
-      TaskManager.updateTask(task.id, { status: 'failed' });
-      UI.showToast(error.message || '图片生成失败。', 'error');
-      if (TaskManager.activeTaskId === task.id) hideLoadingResult();
-    }
+    await TaskManager.runTask({ type: 'text2img', prompt }, async (task) => {
+      try {
+        const result = await ImageAPI.generateImage(prompt, state.apiKey, getImageModel(), state.ratio, (progress) => {
+          TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+          if (TaskManager.activeTaskId === task.id) updateProgress(progress);
+        });
+        TaskManager.updateTask(task.id, { status: 'completed', result });
+        state.lastGeneratedImage = result;
+        state.lastGeneratedVideo = null;
+        HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, imageUrl: result.imageUrl, mediaType: 'image', type: 'generate', createdAt: result.createdAt });
+        if (TaskManager.activeTaskId === task.id) showResult(result);
+        renderHistory();
+        UI.showToast('图片生成成功。', 'success');
+        return result;
+      } catch (error) {
+        TaskManager.updateTask(task.id, { status: 'failed' });
+        UI.showToast(error.message || '图片生成失败。', 'error');
+        if (TaskManager.activeTaskId === task.id) hideLoadingResult();
+        throw error;
+      }
+    }).catch(() => {});
   }
 
   async function handleEdit() {
@@ -594,32 +687,35 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     if (!ensureApiKey()) return;
-    const task = TaskManager.addTask({ type: 'img2img', prompt });
-    if (!task) return;
-    try {
-      const result = await ImageAPI.editImage({
-        prompt,
-        apiKey: state.apiKey,
-        model: getImageModel(),
-        mainImageBase64: state.mainImage,
-        referenceImagesBase64: state.referenceImages,
-        onProgress: (progress) => {
-          TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
-          if (TaskManager.activeTaskId === task.id) updateProgress(progress);
-        }
-      });
-      TaskManager.updateTask(task.id, { status: 'completed', result });
-      state.lastGeneratedImage = result;
-      state.lastGeneratedVideo = null;
-      HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, mediaType: 'image', type: 'edit', createdAt: result.createdAt });
-      if (TaskManager.activeTaskId === task.id) showResult(result);
-      renderHistory();
-      UI.showToast('图片编辑成功。', 'success');
-    } catch (error) {
-      TaskManager.updateTask(task.id, { status: 'failed' });
-      UI.showToast(error.message || '图片编辑失败。', 'error');
-      if (TaskManager.activeTaskId === task.id) hideLoadingResult();
-    }
+    await TaskManager.runTask({ type: 'img2img', prompt }, async (task) => {
+      try {
+        const result = await ImageAPI.editImage({
+          prompt,
+          apiKey: state.apiKey,
+          model: getImageModel(),
+          ratio: state.ratio,
+          mainImageBase64: state.mainImage,
+          referenceImagesBase64: state.referenceImages,
+          onProgress: (progress) => {
+            TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+            if (TaskManager.activeTaskId === task.id) updateProgress(progress);
+          }
+        });
+        TaskManager.updateTask(task.id, { status: 'completed', result });
+        state.lastGeneratedImage = result;
+        state.lastGeneratedVideo = null;
+        HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, imageUrl: result.imageUrl, mediaType: 'image', type: 'edit', createdAt: result.createdAt });
+        if (TaskManager.activeTaskId === task.id) showResult(result);
+        renderHistory();
+        UI.showToast('图片编辑成功。', 'success');
+        return result;
+      } catch (error) {
+        TaskManager.updateTask(task.id, { status: 'failed' });
+        UI.showToast(error.message || '图片编辑失败。', 'error');
+        if (TaskManager.activeTaskId === task.id) hideLoadingResult();
+        throw error;
+      }
+    }).catch(() => {});
   }
 
   function consumeVideoResult(result, type) {
@@ -637,25 +733,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     if (!ensureApiKey()) return;
-    const task = TaskManager.addTask({ type: 'text2video', prompt });
-    if (!task) return;
-    UI.setLoading('generateVideoBtn', true);
-    showVideoProgressResult();
-    try {
-      const result = await ImageAPI.generateVideo(prompt, state.apiKey, state.videoRatio, getTextVideoModel(), (progress) => {
-        updateProgress(progress);
-        TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
-      });
-      TaskManager.updateTask(task.id, { status: 'completed', result });
-      consumeVideoResult(result, 'video');
-      UI.showToast('视频生成成功。', 'success');
-    } catch (error) {
-      TaskManager.updateTask(task.id, { status: 'failed' });
-      UI.showToast(error.message || '视频生成失败。', 'error');
-      hideLoadingResult();
-    } finally {
-      UI.setLoading('generateVideoBtn', false);
-    }
+    await TaskManager.runTask({ type: 'text2video', prompt }, async (task) => {
+      UI.setLoading('generateVideoBtn', true);
+      try {
+        const result = await ImageAPI.generateVideo(prompt, state.apiKey, state.videoRatio, getTextVideoModel(), (progress) => {
+          updateProgress(progress);
+          TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+        });
+        TaskManager.updateTask(task.id, { status: 'completed', result });
+        consumeVideoResult(result, 'video');
+        UI.showToast('视频生成成功。', 'success');
+        return result;
+      } catch (error) {
+        TaskManager.updateTask(task.id, { status: 'failed' });
+        UI.showToast(error.message || '视频生成失败。', 'error');
+        hideLoadingResult();
+        throw error;
+      } finally {
+        UI.setLoading('generateVideoBtn', false);
+      }
+    }).catch(() => {});
   }
 
   async function handleGenerateVideoFromImages() {
@@ -666,58 +763,63 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (!ensureApiKey()) return;
     const taskType = state.videoInputMode === 'reference' ? 'reference2video' : 'frame2video';
-    const task = TaskManager.addTask({ type: taskType, prompt });
-    if (!task) return;
-    UI.setLoading('generateFrameVideoBtn', true);
-    showVideoProgressResult();
-    try {
-      let result;
-      if (state.videoInputMode === 'reference') {
-        if (state.videoReferenceImages.length === 0) {
-          throw new Error('请至少上传 1 张参考图。');
-        }
-        result = await ImageAPI.generateVideoFromReferences({
-          prompt,
-          apiKey: state.apiKey,
-          ratio: state.videoRatio,
-          model: getReferenceVideoModel(),
-          referenceImagesBase64: state.videoReferenceImages,
-          onProgress: (progress) => {
-            updateProgress(progress);
-            TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+    await TaskManager.runTask({ type: taskType, prompt }, async (task) => {
+      UI.setLoading('generateFrameVideoBtn', true);
+      try {
+        let result;
+        if (state.videoInputMode === 'reference') {
+          if (state.videoReferenceImages.length === 0) {
+            throw new Error('请至少上传 1 张参考图。');
           }
-        });
-      } else {
-        const startFrameBase64 = currentFrameSource();
-        if (!startFrameBase64) {
-          throw new Error('请先上传首帧。');
-        }
-        result = await ImageAPI.generateVideoFromFrames({
-          prompt,
-          apiKey: state.apiKey,
-          ratio: state.videoRatio,
-          model: getFrameVideoModel(),
-          startFrameBase64,
-          endFrameBase64: state.videoInputMode === 'transition' ? state.endFrame : null,
-          onProgress: (progress) => {
-            updateProgress(progress);
-            TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+          result = await ImageAPI.generateVideoFromReferences({
+            prompt,
+            apiKey: state.apiKey,
+            ratio: state.videoRatio,
+            model: getReferenceVideoModel(),
+            referenceImagesBase64: state.videoReferenceImages,
+            onProgress: (progress) => {
+              updateProgress(progress);
+              TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+            }
+          });
+        } else {
+          const startFrameBase64 = currentFrameSource();
+          if (!startFrameBase64) {
+            throw new Error('请先上传首帧。');
           }
-        });
+          result = await ImageAPI.generateVideoFromFrames({
+            prompt,
+            apiKey: state.apiKey,
+            ratio: state.videoRatio,
+            model: getFrameVideoModel(),
+            startFrameBase64,
+            endFrameBase64: state.videoInputMode === 'transition' ? state.endFrame : null,
+            onProgress: (progress) => {
+              updateProgress(progress);
+              TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
+            }
+          });
+        }
+        TaskManager.updateTask(task.id, { status: 'completed', result });
+        consumeVideoResult(result, state.videoInputMode === 'reference' ? 'reference-video' : 'video-frames');
+        UI.showToast('视频生成成功。', 'success');
+        return result;
+      } catch (error) {
+        TaskManager.updateTask(task.id, { status: 'failed' });
+        UI.showToast(error.message || '视频生成失败。', 'error');
+        hideLoadingResult();
+        throw error;
+      } finally {
+        UI.setLoading('generateFrameVideoBtn', false);
       }
-      TaskManager.updateTask(task.id, { status: 'completed', result });
-      consumeVideoResult(result, state.videoInputMode === 'reference' ? 'reference-video' : 'video-frames');
-      UI.showToast('视频生成成功。', 'success');
-    } catch (error) {
-      TaskManager.updateTask(task.id, { status: 'failed' });
-      UI.showToast(error.message || '视频生成失败。', 'error');
-      hideLoadingResult();
-    } finally {
-      UI.setLoading('generateFrameVideoBtn', false);
-    }
+    }).catch(() => {});
   }
 
   async function handleDownload() {
+    if (state.lastGeneratedImage?.imageUrl) {
+      UI.downloadUrl(state.lastGeneratedImage.imageUrl, `nano-image-${Date.now()}.png`);
+      return;
+    }
     if (state.lastGeneratedImage?.imageBase64) {
       UI.downloadImage(state.lastGeneratedImage.imageBase64, `nano-image-${Date.now()}.png`);
       return;
@@ -740,9 +842,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  function handleContinueEdit() {
-    if (!state.lastGeneratedImage?.imageBase64) return;
-    setImagePreview(state.lastGeneratedImage.imageBase64, 'mainImagePreview', 'mainImageZone', 'removeMainImage', 'mainImage');
+  async function handleContinueEdit() {
+    const imageSource = getImageSource(state.lastGeneratedImage);
+    if (!imageSource) return;
+    const base64 = state.lastGeneratedImage.imageBase64 || await urlToDataUrl(state.lastGeneratedImage.imageUrl);
+    setImagePreview(base64, 'mainImagePreview', 'mainImageZone', 'removeMainImage', 'mainImage');
     document.querySelector('[data-tab="img2img"]').click();
     UI.showToast('已载入到图生图编辑区。', 'success');
   }
@@ -754,7 +858,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     UI.showToast('历史记录已清空。', 'success');
   }
 
-  function loadImageToVideoFlow(imageBase64) {
+  async function loadImageToVideoFlow(imageInput) {
+    const imageBase64 = typeof imageInput === 'string' && imageInput.startsWith('data:image/')
+      ? imageInput
+      : await urlToDataUrl(imageInput);
     state.videoInputMode = 'single';
     localStorage.setItem('nano_video_input_mode', state.videoInputMode);
     updateVideoModeUI();
@@ -786,7 +893,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('closeImageModalBtn').addEventListener('click', () => UI.hideModal('imageModal'));
     imageModal.querySelector('.modal-backdrop').addEventListener('click', () => UI.hideModal('imageModal'));
     document.getElementById('modalDownloadBtn').addEventListener('click', () => {
-      if (modalImage.src) UI.downloadImage(modalImage.src, `nano-image-${Date.now()}.png`);
+      if (!modalImage.src) return;
+      if (modalImage.src.startsWith('data:image/')) {
+        UI.downloadImage(modalImage.src, `nano-image-${Date.now()}.png`);
+      } else {
+        UI.downloadUrl(modalImage.src, `nano-image-${Date.now()}.png`);
+      }
     });
     document.getElementById('modalEditBtn').addEventListener('click', () => {
       if (!modalImage.src) return;
@@ -796,7 +908,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('modalGenerateVideoBtn').addEventListener('click', () => {
       if (!modalImage.src) return;
-      loadImageToVideoFlow(modalImage.src);
+      void loadImageToVideoFlow(modalImage.src);
       UI.hideModal('imageModal');
     });
   }
@@ -810,7 +922,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('generateVideoBtn').addEventListener('click', handleGenerateVideo);
     document.getElementById('generateFrameVideoBtn').addEventListener('click', handleGenerateVideoFromImages);
     document.getElementById('generateVideoFromImageBtn').addEventListener('click', () => {
-      if (state.lastGeneratedImage?.imageBase64) loadImageToVideoFlow(state.lastGeneratedImage.imageBase64);
+      const imageSource = getImageSource(state.lastGeneratedImage);
+      if (imageSource) void loadImageToVideoFlow(imageSource);
     });
     document.getElementById('resultContent').addEventListener('click', (event) => {
       if (event.target.classList.contains('result-image')) {
@@ -844,7 +957,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       return `
         <div class="history-item" data-id="${item.id}" draggable="true">
-          <img src="${item.imageBase64}" alt="${UI.truncateText(item.prompt, 16)}">
+          <img src="${getImageSource(item)}" alt="${UI.truncateText(item.prompt, 16)}">
           <div class="history-item-overlay">
             <div class="history-item-actions">
               <button class="history-view-btn" data-id="${item.id}">查看</button>
@@ -865,7 +978,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           state.lastGeneratedVideo = { videoUrl: item.videoUrl, prompt: item.prompt, createdAt: item.createdAt };
           showVideoResult(state.lastGeneratedVideo);
         } else {
-          document.getElementById('modalImage').src = item.imageBase64;
+          document.getElementById('modalImage').src = getImageSource(item);
           UI.showModal('imageModal');
         }
       });
@@ -880,19 +993,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     });
     historyGrid.querySelectorAll('.history-edit-btn').forEach((button) => {
-      button.addEventListener('click', (event) => {
+      button.addEventListener('click', async (event) => {
         event.stopPropagation();
         const item = HistoryManager.getById(button.dataset.id);
-        if (!item?.imageBase64) return;
-        setImagePreview(item.imageBase64, 'mainImagePreview', 'mainImageZone', 'removeMainImage', 'mainImage');
+        const imageSource = getImageSource(item);
+        if (!imageSource) return;
+        const base64 = item.imageBase64 || await urlToDataUrl(item.imageUrl);
+        setImagePreview(base64, 'mainImagePreview', 'mainImageZone', 'removeMainImage', 'mainImage');
         document.querySelector('[data-tab="img2img"]').click();
       });
     });
     historyGrid.querySelectorAll('.history-video-btn').forEach((button) => {
-      button.addEventListener('click', (event) => {
+      button.addEventListener('click', async (event) => {
         event.stopPropagation();
         const item = HistoryManager.getById(button.dataset.id);
-        if (item?.imageBase64) loadImageToVideoFlow(item.imageBase64);
+        const imageSource = getImageSource(item);
+        if (imageSource) await loadImageToVideoFlow(imageSource);
       });
     });
     historyGrid.querySelectorAll('.history-item-delete').forEach((button) => {
@@ -917,7 +1033,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           state.lastGeneratedVideo = historyItem;
           showVideoResult(historyItem);
         } else {
-          document.getElementById('modalImage').src = historyItem.imageBase64;
+          document.getElementById('modalImage').src = getImageSource(historyItem);
           UI.showModal('imageModal');
         }
       });
