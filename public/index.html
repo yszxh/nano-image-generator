@@ -77,6 +77,41 @@
                 <p class="input-hint" id="modelHint"></p>
               </div>
 
+              <div class="form-group image-settings hidden" id="gptImageAdvancedGroup">
+                <div class="advanced-settings-card">
+                  <div class="advanced-settings-header">
+                    <label for="gptImageQualitySelect">高级输出设置</label>
+                    <p class="input-hint">仅 gpt-image-2 支持，用于控制质量、背景和输出格式。</p>
+                  </div>
+                  <div class="advanced-settings-grid">
+                    <div>
+                      <label for="gptImageQualitySelect">质量</label>
+                      <select id="gptImageQualitySelect" class="input">
+                        <option value="auto">自动</option>
+                        <option value="low">低</option>
+                        <option value="medium">中</option>
+                        <option value="high">高</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="gptImageBackgroundSelect">背景</label>
+                      <select id="gptImageBackgroundSelect" class="input">
+                        <option value="auto">自动</option>
+                        <option value="opaque">不透明</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="gptImageFormatSelect">输出格式</label>
+                      <select id="gptImageFormatSelect" class="input">
+                        <option value="png">PNG</option>
+                        <option value="jpeg">JPEG</option>
+                        <option value="webp">WEBP</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div id="text2imgPanel" class="tab-panel active">
                 <div class="form-group">
                   <label for="promptInput">提示词</label>

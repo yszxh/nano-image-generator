@@ -50,7 +50,12 @@ function imageCacheSet(key, contentType, buffer) {
   }
   imageCache.set(key, { contentType, buffer, ts: Date.now() });
 }
-const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-landscape';
+function cacheGeneratedImageBuffer(buffer, contentType) {
+  const cacheKey = `generated:${uuidv4()}`;
+  imageCacheSet(cacheKey, contentType, buffer);
+  return `/api/generated-image/${encodeURIComponent(cacheKey)}`;
+}
+const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 const DEFAULT_VIDEO_MODELS = {
   text2video: {
     landscape: 'veo_3_1_t2v_fast_landscape',
@@ -71,6 +76,13 @@ const RATIO_MAP = {
   square: '1:1',
   'four-three': '4:3',
   'three-four': '3:4'
+};
+const OPENAI_IMAGE_SIZE_MAP = {
+  portrait: '1024x1536',
+  landscape: '1536x1024',
+  square: '1024x1024',
+  'four-three': '1536x1152',
+  'three-four': '1152x1536'
 };
 
 const upload = multer({
@@ -460,6 +472,12 @@ function getContentType(response) {
   return (response?.headers?.get('content-type') || '').toLowerCase();
 }
 
+function getContentLength(response) {
+  const raw = response?.headers?.get('content-length');
+  const value = raw ? Number(raw) : 0;
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 function isJsonContentType(contentType) {
   return contentType.includes('application/json') || contentType.includes('+json');
 }
@@ -491,6 +509,89 @@ function resolveImageAspectRatio(ratio, model) {
   const ratioMatch = normalizedModel.replace(/-(\d+k)$/i, '').match(/-(portrait|landscape|square|four-three|three-four)$/i);
   const ratioKey = ratioMatch ? ratioMatch[1].toLowerCase() : 'landscape';
   return RATIO_MAP[ratioKey] || '16:9';
+}
+
+function resolveOpenAiImageSize(ratio) {
+  return OPENAI_IMAGE_SIZE_MAP[ratio] || OPENAI_IMAGE_SIZE_MAP.square;
+}
+
+function getFlow2ApiRestBaseUrl() {
+  const url = new URL(FLOW2API_BASE_URL);
+  url.search = '';
+  url.hash = '';
+  url.pathname = url.pathname.replace(/\/chat\/completions\/?$/i, '');
+  return url.toString().replace(/\/$/, '');
+}
+
+function parseDataUrl(value) {
+  if (typeof value !== 'string') return null;
+  const match = value.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return {
+    mimeType: match[1],
+    buffer: Buffer.from(match[2], 'base64')
+  };
+}
+
+function getImageMimeType(outputFormat = 'png') {
+  const format = (outputFormat || 'png').toLowerCase();
+  if (format === 'jpeg' || format === 'jpg') return 'image/jpeg';
+  if (format === 'webp') return 'image/webp';
+  return 'image/png';
+}
+
+function getImageOutputFormatFromMime(mimeType = 'image/png') {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpeg';
+  if (normalized.includes('webp')) return 'webp';
+  return 'png';
+}
+
+function parseOpenAiImageResponse(json, outputFormat = 'png') {
+  const item = json?.data?.[0];
+  if (!item) {
+    throw createAppError('OpenAI image API did not return any image data.', {
+      status: 502,
+      code: 'image_data_missing',
+      retryable: true
+    });
+  }
+  if (item.b64_json) {
+    const contentType = getImageMimeType(outputFormat);
+    const buffer = Buffer.from(item.b64_json, 'base64');
+    return {
+      imageBase64: null,
+      imageUrl: cacheGeneratedImageBuffer(buffer, contentType),
+      imageMimeType: contentType,
+      imageOutputFormat: getImageOutputFormatFromMime(contentType),
+      imageResponseFormat: 'b64_json',
+      imageBytes: buffer.length,
+      revisedPrompt: item.revised_prompt || null
+    };
+  }
+  if (item.url) {
+    let remoteHost = null;
+    try {
+      remoteHost = new URL(item.url).hostname;
+    } catch {
+      remoteHost = null;
+    }
+    return {
+      imageBase64: null,
+      imageUrl: `/api/proxy-image?url=${encodeURIComponent(item.url)}`,
+      imageMimeType: getImageMimeType(outputFormat),
+      imageOutputFormat: getImageOutputFormatFromMime(getImageMimeType(outputFormat)),
+      imageResponseFormat: 'url',
+      imageBytes: null,
+      remoteHost,
+      revisedPrompt: item.revised_prompt || null
+    };
+  }
+  throw createAppError('OpenAI image API returned an image response without b64_json or url.', {
+    status: 502,
+    code: 'image_data_missing',
+    retryable: true
+  });
 }
 
 function classifyFlow2ApiError(status, model, errorText) {
@@ -811,12 +912,250 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
   const parsed = parseGeminiImageResponse(json);
 
   if (parsed.type === 'base64') {
-    return { imageBase64: `data:${parsed.mimeType};base64,${parsed.data}`, imageUrl: null, retryCount: Math.max(0, retryState.attempts - 1) };
+    return {
+      imageBase64: `data:${parsed.mimeType};base64,${parsed.data}`,
+      imageUrl: null,
+      imageMimeType: parsed.mimeType,
+      imageOutputFormat: getImageOutputFormatFromMime(parsed.mimeType),
+      retryCount: Math.max(0, retryState.attempts - 1)
+    };
   }
 
   return {
     imageBase64: null,
     imageUrl: `/api/proxy-image?url=${encodeURIComponent(parsed.url)}`,
+    imageMimeType: 'image/png',
+    imageOutputFormat: 'png',
+    retryCount: Math.max(0, retryState.attempts - 1)
+  };
+}
+
+function isOpenAiImageModel(model) {
+  return model === 'gpt-image-2';
+}
+
+async function callOpenAiImageGenerate({ prompt, apiKey, model, size, quality, background, outputFormat }) {
+  const resolvedApiKey = withResolvedApiKey(apiKey);
+  if (!resolvedApiKey) {
+    throw new Error('Missing API key for OpenAI image model.');
+  }
+
+  const timing = {
+    operation: 'generate',
+    model,
+    size,
+    quality: quality || null,
+    background: background || null,
+    outputFormat: outputFormat || null
+  };
+  const requestStartedAt = Date.now();
+
+  const payload = {
+    model,
+    prompt,
+    size
+  };
+  if (quality) payload.quality = quality;
+  if (background) payload.background = background;
+  if (outputFormat) payload.output_format = outputFormat;
+
+  let response;
+  const retryState = { attempts: 0 };
+  await withRetry(async () => {
+    const { controller, timeoutId } = createAbortController();
+    try {
+      const fetchStartedAt = Date.now();
+      response = await fetch(`${getFlow2ApiRestBaseUrl()}/images/generations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${resolvedApiKey}`
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      timing.upstreamHeadersMs = Date.now() - fetchStartedAt;
+    } catch (error) {
+      clearAbortTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('OpenAI image generation request timed out.');
+      }
+      throw new Error(`OpenAI image generation request failed: ${error.message}`);
+    }
+    clearAbortTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorText = await safeReadErrorText(response);
+      const classified = classifyFlow2ApiError(response.status, model, errorText);
+      throw createAppError(classified.message, {
+        status: response.status,
+        code: classified.code,
+        retryable: classified.retryable,
+        details: { upstream: parseUpstreamError(errorText), retryCount: Math.max(0, retryState.attempts - 1) }
+      });
+    }
+  }, PROXY_MAX_RETRIES, retryState);
+
+  const responseContentType = getContentType(response);
+  timing.responseContentType = responseContentType || null;
+  timing.responseContentLength = getContentLength(response);
+  if (isHtmlContentType(responseContentType)) {
+    const htmlText = await safeReadErrorText(response);
+    throw createAppError('OpenAI image API returned HTML instead of JSON.', {
+      status: 502,
+      code: 'html_response_instead_of_json',
+      retryable: true,
+      details: { snippet: htmlText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
+  if (!isJsonContentType(responseContentType)) {
+    const bodyText = await safeReadErrorText(response);
+    throw createAppError(`OpenAI image API returned unexpected content type: ${responseContentType || 'unknown'}`, {
+      status: 502,
+      code: 'unexpected_content_type',
+      retryable: true,
+      details: { snippet: bodyText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
+
+  let json;
+  try {
+    const bodyStartedAt = Date.now();
+    json = await response.json();
+    timing.upstreamBodyJsonMs = Date.now() - bodyStartedAt;
+  } catch (error) {
+    throw new Error(`OpenAI image API returned invalid JSON: ${error.message}`);
+  }
+
+  const parseStartedAt = Date.now();
+  const parsed = parseOpenAiImageResponse(json, outputFormat);
+  timing.parseImageMs = Date.now() - parseStartedAt;
+  console.log('[OpenAI Image Timing]', JSON.stringify({
+    ...timing,
+    responseFormat: parsed.imageResponseFormat || null,
+    imageBytes: parsed.imageBytes || null,
+    remoteHost: parsed.remoteHost || null,
+    totalMs: Date.now() - requestStartedAt,
+    retryCount: Math.max(0, retryState.attempts - 1)
+  }));
+
+  return {
+    ...parsed,
+    retryCount: Math.max(0, retryState.attempts - 1)
+  };
+}
+
+async function callOpenAiImageEdit({ prompt, apiKey, model, size, quality, background, outputFormat, imageSources }) {
+  const resolvedApiKey = withResolvedApiKey(apiKey);
+  if (!resolvedApiKey) {
+    throw new Error('Missing API key for OpenAI image model.');
+  }
+
+  const timing = {
+    operation: 'edit',
+    model,
+    size,
+    quality: quality || null,
+    background: background || null,
+    outputFormat: outputFormat || null,
+    inputImageCount: imageSources.length
+  };
+  const requestStartedAt = Date.now();
+
+  const formData = new FormData();
+  formData.append('model', model);
+  formData.append('prompt', prompt);
+  formData.append('size', size);
+  if (quality) formData.append('quality', quality);
+  if (background) formData.append('background', background);
+  if (outputFormat) formData.append('output_format', outputFormat);
+  for (const [index, imageSource] of imageSources.entries()) {
+    const parsed = parseDataUrl(imageSource);
+    if (!parsed) continue;
+    formData.append('image[]', new Blob([parsed.buffer], { type: parsed.mimeType }), `image-${index + 1}.png`);
+  }
+
+  let response;
+  const retryState = { attempts: 0 };
+  await withRetry(async () => {
+    const { controller, timeoutId } = createAbortController();
+    try {
+      const fetchStartedAt = Date.now();
+      response = await fetch(`${getFlow2ApiRestBaseUrl()}/images/edits`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resolvedApiKey}`
+        },
+        body: formData,
+        signal: controller.signal
+      });
+      timing.upstreamHeadersMs = Date.now() - fetchStartedAt;
+    } catch (error) {
+      clearAbortTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('OpenAI image edit request timed out.');
+      }
+      throw new Error(`OpenAI image edit request failed: ${error.message}`);
+    }
+    clearAbortTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorText = await safeReadErrorText(response);
+      const classified = classifyFlow2ApiError(response.status, model, errorText);
+      throw createAppError(classified.message, {
+        status: response.status,
+        code: classified.code,
+        retryable: classified.retryable,
+        details: { upstream: parseUpstreamError(errorText), retryCount: Math.max(0, retryState.attempts - 1) }
+      });
+    }
+  }, PROXY_MAX_RETRIES, retryState);
+
+  const responseContentType = getContentType(response);
+  timing.responseContentType = responseContentType || null;
+  timing.responseContentLength = getContentLength(response);
+  if (isHtmlContentType(responseContentType)) {
+    const htmlText = await safeReadErrorText(response);
+    throw createAppError('OpenAI image API returned HTML instead of JSON.', {
+      status: 502,
+      code: 'html_response_instead_of_json',
+      retryable: true,
+      details: { snippet: htmlText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
+  if (!isJsonContentType(responseContentType)) {
+    const bodyText = await safeReadErrorText(response);
+    throw createAppError(`OpenAI image API returned unexpected content type: ${responseContentType || 'unknown'}`, {
+      status: 502,
+      code: 'unexpected_content_type',
+      retryable: true,
+      details: { snippet: bodyText, retryCount: Math.max(0, retryState.attempts - 1) }
+    });
+  }
+
+  let json;
+  try {
+    const bodyStartedAt = Date.now();
+    json = await response.json();
+    timing.upstreamBodyJsonMs = Date.now() - bodyStartedAt;
+  } catch (error) {
+    throw new Error(`OpenAI image API returned invalid JSON: ${error.message}`);
+  }
+
+  const parseStartedAt = Date.now();
+  const parsed = parseOpenAiImageResponse(json, outputFormat);
+  timing.parseImageMs = Date.now() - parseStartedAt;
+  console.log('[OpenAI Image Timing]', JSON.stringify({
+    ...timing,
+    responseFormat: parsed.imageResponseFormat || null,
+    imageBytes: parsed.imageBytes || null,
+    remoteHost: parsed.remoteHost || null,
+    totalMs: Date.now() - requestStartedAt,
+    retryCount: Math.max(0, retryState.attempts - 1)
+  }));
+
+  return {
+    ...parsed,
     retryCount: Math.max(0, retryState.attempts - 1)
   };
 }
@@ -936,17 +1275,25 @@ function buildImageMessages(prompt, imageSources = []) {
 }
 
 async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
+  const proxyStartedAt = Date.now();
+  const proxyRequestId = uuidv4();
   const sanitizedUrl = sanitizeUrl(url);
   if (!sanitizedUrl || sanitizedUrl.startsWith('data:')) {
     return res.status(400).json({ error: 'Invalid media URL.' });
   }
 
   // SSRF 防护：仅允许白名单域名
+  let targetInfo;
   try {
-    const parsedHost = new URL(sanitizedUrl).hostname.toLowerCase();
+    const parsedUrl = new URL(sanitizedUrl);
+    const parsedHost = parsedUrl.hostname.toLowerCase();
     if (!PROXY_ALLOWED_HOSTS.has(parsedHost)) {
       return res.status(403).json({ error: `Proxy target host not allowed: ${parsedHost}` });
     }
+    targetInfo = {
+      host: parsedHost,
+      pathTail: parsedUrl.pathname.slice(-80) || '/'
+    };
   } catch {
     return res.status(400).json({ error: 'Invalid media URL.' });
   }
@@ -958,6 +1305,15 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
       res.set('Content-Type', cached.contentType);
       res.set('Cache-Control', 'public, max-age=86400');
       res.set('X-Cache', 'HIT');
+      console.log('[Proxy Media Timing]', JSON.stringify({
+        requestId: proxyRequestId,
+        mediaType: defaultContentType.startsWith('image/') ? 'image' : 'video',
+        cache: 'HIT',
+        targetHost: targetInfo.host,
+        targetPathTail: targetInfo.pathTail,
+        bytes: cached.buffer.length,
+        totalMs: Date.now() - proxyStartedAt
+      }));
       return res.send(cached.buffer);
     }
   }
@@ -970,10 +1326,21 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
   const { controller, timeoutId } = createAbortController();
   let upstream;
   try {
+    const upstreamStartedAt = Date.now();
     upstream = await fetch(sanitizedUrl, {
       signal: controller.signal,
       headers: upstreamHeaders
     });
+    console.log('[Proxy Media Headers]', JSON.stringify({
+      requestId: proxyRequestId,
+      mediaType: defaultContentType.startsWith('image/') ? 'image' : 'video',
+      targetHost: targetInfo.host,
+      targetPathTail: targetInfo.pathTail,
+      status: upstream.status,
+      contentType: getContentType(upstream) || null,
+      contentLength: getContentLength(upstream),
+      headersMs: Date.now() - upstreamStartedAt
+    }));
   } catch (error) {
     clearAbortTimeout(timeoutId);
     const message = error.name === 'AbortError' ? 'Media proxy timed out.' : `Media proxy failed: ${error.message}`;
@@ -1021,9 +1388,20 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
   if (!fileName) {
     const contentType = upstream.headers.get('content-type') || defaultContentType;
     try {
+      const bufferStartedAt = Date.now();
       const buffer = Buffer.from(await upstream.arrayBuffer());
       imageCacheSet(sanitizedUrl, contentType, buffer);
       res.set('X-Cache', 'MISS');
+      console.log('[Proxy Media Timing]', JSON.stringify({
+        requestId: proxyRequestId,
+        mediaType: 'image',
+        cache: 'MISS',
+        targetHost: targetInfo.host,
+        targetPathTail: targetInfo.pathTail,
+        bytes: buffer.length,
+        bodyBufferMs: Date.now() - bufferStartedAt,
+        totalMs: Date.now() - proxyStartedAt
+      }));
       return res.send(buffer);
     } catch {
       // buffer 失败则回退到流式
@@ -1051,16 +1429,24 @@ app.post('/api/generate', async (req, res) => {
     const model = req.body.model || DEFAULT_IMAGE_MODEL;
     const aspectRatio = resolveImageAspectRatio(req.body.ratio, model);
     const apiKey = withResolvedApiKey(req.body.apiKey, req);
+    const quality = req.body.quality;
+    const background = req.body.background;
+    const outputFormat = req.body.outputFormat;
 
     if (!prompt) {
       return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Image generation failed.');
     }
 
     if (!apiKey) {
-      return sendAppError(res, createAppError('Gemini API key is required.', { status: 400, code: 'api_key_required' }), 'Image generation failed.');
+      return sendAppError(res, createAppError('API key is required.', { status: 400, code: 'api_key_required' }), 'Image generation failed.');
     }
 
-    const result = await callGeminiGenerateContent({ prompt, imageSources: [], apiKey, model, aspectRatio });
+    let result;
+    if (isOpenAiImageModel(model)) {
+      result = await callOpenAiImageGenerate({ prompt, apiKey, model, size: resolveOpenAiImageSize(req.body.ratio), quality, background, outputFormat });
+    } else {
+      result = await callGeminiGenerateContent({ prompt, imageSources: [], apiKey, model, aspectRatio });
+    }
 
     res.json({
       success: true,
@@ -1069,6 +1455,8 @@ app.post('/api/generate', async (req, res) => {
       model,
       imageBase64: result.imageBase64 || null,
       imageUrl: result.imageUrl || null,
+      imageMimeType: result.imageMimeType || null,
+      imageOutputFormat: result.imageOutputFormat || null,
       createdAt: new Date().toISOString()
     });
     logRequestTelemetry({ requestId, route: '/api/generate', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt });
@@ -1090,13 +1478,16 @@ app.post('/api/edit', upload.fields([
     const model = req.body.model || DEFAULT_IMAGE_MODEL;
     const aspectRatio = resolveImageAspectRatio(req.body.ratio, model);
     const apiKey = withResolvedApiKey(req.body.apiKey, req);
+    const quality = req.body.quality;
+    const background = req.body.background;
+    const outputFormat = req.body.outputFormat;
 
     if (!prompt) {
       return sendAppError(res, createAppError('Prompt is required.', { status: 400, code: 'prompt_required' }), 'Image edit failed.');
     }
 
     if (!apiKey) {
-      return sendAppError(res, createAppError('Gemini API key is required.', { status: 400, code: 'api_key_required' }), 'Image edit failed.');
+      return sendAppError(res, createAppError('API key is required.', { status: 400, code: 'api_key_required' }), 'Image edit failed.');
     }
 
     const imageSources = [];
@@ -1121,7 +1512,12 @@ app.post('/api/edit', upload.fields([
       }
     }
 
-    const result = await callGeminiGenerateContent({ prompt, imageSources, apiKey, model, aspectRatio });
+    let result;
+    if (isOpenAiImageModel(model)) {
+      result = await callOpenAiImageEdit({ prompt, apiKey, model, size: resolveOpenAiImageSize(req.body.ratio), quality, background, outputFormat, imageSources });
+    } else {
+      result = await callGeminiGenerateContent({ prompt, imageSources, apiKey, model, aspectRatio });
+    }
 
     res.json({
       success: true,
@@ -1130,6 +1526,8 @@ app.post('/api/edit', upload.fields([
       model,
       imageBase64: result.imageBase64 || null,
       imageUrl: result.imageUrl || null,
+      imageMimeType: result.imageMimeType || null,
+      imageOutputFormat: result.imageOutputFormat || null,
       createdAt: new Date().toISOString()
     });
     logRequestTelemetry({ requestId, route: '/api/edit', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { inputImageCount: imageSources.length } });
@@ -1272,6 +1670,25 @@ app.post('/api/generate-video-from-references', upload.fields([
 
 app.get('/api/proxy-image', async (req, res) => {
   return proxyMediaRequest(req, res, req.query.url, 'image/png');
+});
+
+app.get('/api/generated-image/:id', (req, res) => {
+  const startedAt = Date.now();
+  const cacheKey = req.params.id;
+  const cached = imageCacheGet(cacheKey);
+  if (!cached) {
+    return res.status(404).json({ error: 'Generated image not found or expired.' });
+  }
+  res.set('Content-Type', cached.contentType);
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.set('X-Cache', 'HIT');
+  console.log('[Generated Image Timing]', JSON.stringify({
+    cache: 'HIT',
+    contentType: cached.contentType,
+    bytes: cached.buffer.length,
+    totalMs: Date.now() - startedAt
+  }));
+  return res.send(cached.buffer);
 });
 
 app.get('/api/proxy-video', async (req, res) => {

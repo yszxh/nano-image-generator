@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     apiKey: localStorage.getItem('nano_api_key') || '',
     ratio: localStorage.getItem('nano_ratio') || FlowConfig.image.defaultRatio,
     modelVersion: localStorage.getItem('nano_model_version') || FlowConfig.image.defaultVersion,
+    gptImageQuality: localStorage.getItem('nano_gpt_image_quality') || 'auto',
+    gptImageBackground: localStorage.getItem('nano_gpt_image_background') || 'auto',
+    gptImageOutputFormat: localStorage.getItem('nano_gpt_image_output_format') || 'png',
     theme: localStorage.getItem('nano_theme') || 'dark',
     videoRatio: localStorage.getItem('nano_video_ratio') || FlowConfig.video.defaultRatio,
     textVideoModel: localStorage.getItem('nano_text_video_model') || FlowConfig.video.defaultTextModel,
@@ -18,8 +21,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     endFrame: null,
     videoReferenceImages: [],
     lastGeneratedVideo: null,
-    lastVideoBlobUrl: null
+    lastVideoBlobUrl: null,
+    modalImageItem: null,
+    progressStartedAt: null,
+    progressTimer: null,
+    progressHintIndex: 0
   };
+
+  const PROGRESS_HINTS = [
+    '正在排队调用 OpenAI 图像模型',
+    '模型正在理解提示词和画面比例',
+    '正在生成主体、材质和光影细节',
+    '正在整理输出图片，请保持页面打开',
+    '生成任务仍在运行，没有卡死'
+  ];
 
   const TaskManager = {
     MAX_TASKS: 6,
@@ -128,7 +143,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       // 仅持久化基本信息，不持久化巨大的结果数据以节省 storage 空间
       const tasksToSave = this.tasks.map(t => ({
         ...t,
-        result: t.status === 'completed' ? { ...t.result, imageBase64: null, imageUrl: t.result?.imageUrl || null } : t.result
+        result: t.status === 'completed' ? {
+          ...t.result,
+          imageBase64: null,
+          imageUrl: t.result?.imageUrl || null,
+          imageMimeType: t.result?.imageMimeType || null,
+          imageOutputFormat: t.result?.imageOutputFormat || null
+        } : t.result
       })).slice(0, 10);
       localStorage.setItem('nano_tasks', JSON.stringify(tasksToSave));
     },
@@ -149,6 +170,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
 
   const getImageModel = () => FlowConfig.buildImageModel(state.modelVersion, state.ratio);
+  const isGptImage2Selected = () => getImageModel() === 'gpt-image-2';
   const getTextVideoModel = () => FlowConfig.getVideoModel('textModels', state.textVideoModel, state.videoRatio);
   const getFrameVideoModel = () => FlowConfig.getVideoModel('frameModels', state.frameVideoModel, state.videoRatio);
   const getReferenceVideoModel = () => FlowConfig.getVideoModel('referenceModels', state.referenceVideoModel, state.videoRatio);
@@ -273,6 +295,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     localStorage.setItem('nano_model_version', state.modelVersion);
     select.value = currentVersion;
     document.getElementById('modelHint').textContent = `${versionConfig.hint} | ${getImageModel()}`;
+    updateGptImageAdvancedVisibility();
+  }
+
+  function updateGptImageAdvancedVisibility() {
+    const group = document.getElementById('gptImageAdvancedGroup');
+    if (!group) return;
+    group.classList.toggle('hidden', !isGptImage2Selected());
+  }
+
+  function getImageRequestOptions() {
+    if (!isGptImage2Selected()) {
+      return {};
+    }
+    return {
+      quality: state.gptImageQuality,
+      background: state.gptImageBackground,
+      outputFormat: state.gptImageOutputFormat
+    };
   }
 
   function populateVideoModelSelect(selectId, hintId, entries, selectedId) {
@@ -295,6 +335,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function initImageControls() {
     syncRatioCards('.ratio-card', state.ratio);
+    document.getElementById('gptImageQualitySelect').value = state.gptImageQuality;
+    document.getElementById('gptImageBackgroundSelect').value = state.gptImageBackground;
+    document.getElementById('gptImageFormatSelect').value = state.gptImageOutputFormat;
     document.querySelectorAll('.ratio-card').forEach((card) => {
       card.addEventListener('click', () => {
         state.ratio = card.dataset.ratio;
@@ -309,6 +352,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.modelVersion = select.value;
       localStorage.setItem('nano_model_version', state.modelVersion);
       updateImageVersionOptions();
+    });
+    document.getElementById('gptImageQualitySelect').addEventListener('change', (event) => {
+      state.gptImageQuality = event.target.value;
+      localStorage.setItem('nano_gpt_image_quality', state.gptImageQuality);
+    });
+    document.getElementById('gptImageBackgroundSelect').addEventListener('change', (event) => {
+      state.gptImageBackground = event.target.value;
+      localStorage.setItem('nano_gpt_image_background', state.gptImageBackground);
+    });
+    document.getElementById('gptImageFormatSelect').addEventListener('change', (event) => {
+      state.gptImageOutputFormat = event.target.value;
+      localStorage.setItem('nano_gpt_image_output_format', state.gptImageOutputFormat);
     });
   }
 
@@ -397,6 +452,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function getImageSource(item) {
     return item?.imageUrl || item?.imageBase64 || '';
+  }
+
+  function getImageExtension(item) {
+    const format = (item?.imageOutputFormat || '').toLowerCase();
+    if (format === 'jpeg' || format === 'jpg') return 'jpg';
+    if (format === 'webp') return 'webp';
+    if (format === 'png') return 'png';
+
+    const mimeType = (item?.imageMimeType || '').toLowerCase();
+    if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+    if (mimeType.includes('webp')) return 'webp';
+    if (mimeType.includes('png')) return 'png';
+
+    const source = getImageSource(item);
+    const dataUrlMime = source.match(/^data:(image\/[^;]+);base64,/i)?.[1]?.toLowerCase();
+    if (dataUrlMime?.includes('jpeg') || dataUrlMime?.includes('jpg')) return 'jpg';
+    if (dataUrlMime?.includes('webp')) return 'webp';
+    return 'png';
+  }
+
+  function getImageFilename(item) {
+    return `nano-image-${Date.now()}.${getImageExtension(item)}`;
+  }
+
+  function openImageModal(item) {
+    const imageSource = getImageSource(item);
+    if (!imageSource) return;
+    state.modalImageItem = item;
+    document.getElementById('modalImage').src = imageSource;
+    UI.showModal('imageModal');
   }
 
   async function urlToDataUrl(url) {
@@ -534,12 +619,64 @@ document.addEventListener('DOMContentLoaded', async () => {
     }[state.ratio] || 'skeleton-landscape';
   }
 
-  function showProgressResult() {
-    document.getElementById('resultContent').innerHTML = `
-      <div class="generation-progress">
-        <div class="skeleton-image ${getSkeletonClass()}"></div>
+  function formatElapsed(ms) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+    const seconds = String(totalSeconds % 60).padStart(2, '0');
+    return `${minutes}:${seconds}`;
+  }
+
+  function stopProgressHeartbeat() {
+    if (state.progressTimer) {
+      clearInterval(state.progressTimer);
+      state.progressTimer = null;
+    }
+  }
+
+  function startProgressHeartbeat() {
+    stopProgressHeartbeat();
+    state.progressStartedAt = Date.now();
+    state.progressHintIndex = 0;
+    const tick = () => {
+      const elapsed = document.getElementById('progressElapsed');
+      const hint = document.getElementById('progressHint');
+      if (elapsed) elapsed.textContent = `已等待 ${formatElapsed(Date.now() - state.progressStartedAt)}`;
+      if (hint) {
+        const nextIndex = Math.floor((Date.now() - state.progressStartedAt) / 6500) % PROGRESS_HINTS.length;
+        if (nextIndex !== state.progressHintIndex) {
+          state.progressHintIndex = nextIndex;
+          hint.textContent = PROGRESS_HINTS[nextIndex];
+          hint.classList.remove('hint-pop');
+          void hint.offsetWidth;
+          hint.classList.add('hint-pop');
+        }
+      }
+    };
+    tick();
+    state.progressTimer = setInterval(tick, 1000);
+  }
+
+  function renderProgressShell({ skeletonClass, title, detail, icon = 'AI' }) {
+    return `
+      <div class="generation-progress generation-progress-active">
+        <div class="skeleton-image ${skeletonClass}">
+          <div class="generation-canvas" aria-hidden="true">
+            <span class="generation-ring generation-ring-one"></span>
+            <span class="generation-ring generation-ring-two"></span>
+            <span class="generation-core">${icon}</span>
+            <span class="generation-spark spark-1"></span>
+            <span class="generation-spark spark-2"></span>
+            <span class="generation-spark spark-3"></span>
+            <span class="generation-scan"></span>
+          </div>
+        </div>
+        <div class="progress-copy">
+          <p class="progress-title">${title}</p>
+          <p class="progress-hint" id="progressHint">${detail}</p>
+          <p class="progress-elapsed" id="progressElapsed">已等待 00:00</p>
+        </div>
         <div class="progress-container">
-          <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width: 0%"></div></div>
+          <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill" style="width: 0%"></div></div>
           <div class="progress-info">
             <span class="progress-stage" id="progressStage">Preparing...</span>
             <span class="progress-percent" id="progressPercent">0%</span>
@@ -547,33 +684,41 @@ document.addEventListener('DOMContentLoaded', async () => {
         </div>
       </div>
     `;
+  }
+
+  function showProgressResult() {
+    document.getElementById('resultContent').innerHTML = renderProgressShell({
+      skeletonClass: getSkeletonClass(),
+      title: '正在生成图片',
+      detail: PROGRESS_HINTS[0]
+    });
+    startProgressHeartbeat();
   }
 
   function showVideoProgressResult() {
-    document.getElementById('resultContent').innerHTML = `
-      <div class="generation-progress">
-        <div class="skeleton-image ${state.videoRatio === 'portrait' ? 'skeleton-portrait' : 'skeleton-landscape'}"><span class="skeleton-video-icon">▶</span></div>
-        <div class="progress-container">
-          <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width: 0%"></div></div>
-          <div class="progress-info">
-            <span class="progress-stage" id="progressStage">Preparing...</span>
-            <span class="progress-percent" id="progressPercent">0%</span>
-          </div>
-        </div>
-      </div>
-    `;
+    document.getElementById('resultContent').innerHTML = renderProgressShell({
+      skeletonClass: state.videoRatio === 'portrait' ? 'skeleton-portrait' : 'skeleton-landscape',
+      title: '正在生成视频',
+      detail: '视频任务耗时更久，任务仍在后台运行',
+      icon: '▶'
+    });
+    startProgressHeartbeat();
   }
 
-  function updateProgress({ stage, percent }) {
+  function updateProgress({ stage, percent, indeterminate = false }) {
+    const bar = document.getElementById('progressBar');
     const fill = document.getElementById('progressFill');
     const label = document.getElementById('progressStage');
     const counter = document.getElementById('progressPercent');
     if (fill) fill.style.width = `${Math.round(percent)}%`;
+    if (bar) bar.classList.toggle('indeterminate', indeterminate);
+    if (fill) fill.classList.toggle('indeterminate', indeterminate);
     if (label) label.textContent = stage;
-    if (counter) counter.textContent = `${Math.round(percent)}%`;
+    if (counter) counter.textContent = indeterminate ? '进行中' : `${Math.round(percent)}%`;
   }
 
   function hideLoadingResult() {
+    stopProgressHeartbeat();
     document.getElementById('resultContent').innerHTML = `
       <div class="result-placeholder">
         <span class="placeholder-icon">□</span>
@@ -583,11 +728,44 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function showResult(result) {
+    stopProgressHeartbeat();
     if (state.lastVideoBlobUrl) {
       URL.revokeObjectURL(state.lastVideoBlobUrl);
       state.lastVideoBlobUrl = null;
     }
-    document.getElementById('resultContent').innerHTML = `<img class="result-image" src="${getImageSource(result)}" alt="generated image">`;
+    const imageSrc = getImageSource(result);
+    document.getElementById('resultContent').innerHTML = `
+      <div class="generation-progress" id="imageResultLoading">
+        <div class="skeleton-image ${getSkeletonClass()}"></div>
+        <div class="progress-container">
+          <div class="progress-bar indeterminate" id="progressBar"><div class="progress-fill indeterminate" id="progressFill" style="width: 92%"></div></div>
+          <div class="progress-info">
+            <span class="progress-stage" id="progressStage">正在加载图片结果</span>
+            <span class="progress-percent" id="progressPercent">进行中</span>
+          </div>
+        </div>
+      </div>
+    `;
+    const image = new Image();
+    image.className = 'result-image';
+    image.alt = 'generated image';
+    image.onload = () => {
+      const resultContent = document.getElementById('resultContent');
+      if (!resultContent) return;
+      resultContent.innerHTML = '';
+      resultContent.appendChild(image);
+    };
+    image.onerror = () => {
+      const resultContent = document.getElementById('resultContent');
+      if (!resultContent) return;
+      resultContent.innerHTML = `
+        <div class="result-placeholder">
+          <span class="placeholder-icon">×</span>
+          <p>图片加载失败。</p>
+        </div>
+      `;
+    };
+    image.src = imageSrc;
     document.getElementById('resultActions').classList.remove('hidden');
     document.getElementById('continueEditBtn').classList.remove('hidden');
     document.getElementById('generateVideoFromImageBtn').classList.remove('hidden');
@@ -601,6 +779,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function showVideoResult(result) {
+    stopProgressHeartbeat();
     document.getElementById('resultActions').classList.remove('hidden');
     document.getElementById('continueEditBtn').classList.add('hidden');
     document.getElementById('generateVideoFromImageBtn').classList.add('hidden');
@@ -655,14 +834,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!ensureApiKey()) return;
     await TaskManager.runTask({ type: 'text2img', prompt }, async (task) => {
       try {
-        const result = await ImageAPI.generateImage(prompt, state.apiKey, getImageModel(), state.ratio, (progress) => {
+        const result = await ImageAPI.generateImage(prompt, state.apiKey, getImageModel(), state.ratio, getImageRequestOptions(), (progress) => {
           TaskManager.updateTask(task.id, { progress: progress.percent || 0 });
           if (TaskManager.activeTaskId === task.id) updateProgress(progress);
         });
         TaskManager.updateTask(task.id, { status: 'completed', result });
         state.lastGeneratedImage = result;
         state.lastGeneratedVideo = null;
-        HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, imageUrl: result.imageUrl, mediaType: 'image', type: 'generate', createdAt: result.createdAt });
+        HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, imageUrl: result.imageUrl, imageMimeType: result.imageMimeType, imageOutputFormat: result.imageOutputFormat, mediaType: 'image', type: 'generate', createdAt: result.createdAt });
         if (TaskManager.activeTaskId === task.id) showResult(result);
         renderHistory();
         UI.showToast('图片生成成功。', 'success');
@@ -694,6 +873,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           apiKey: state.apiKey,
           model: getImageModel(),
           ratio: state.ratio,
+          ...getImageRequestOptions(),
           mainImageBase64: state.mainImage,
           referenceImagesBase64: state.referenceImages,
           onProgress: (progress) => {
@@ -704,7 +884,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         TaskManager.updateTask(task.id, { status: 'completed', result });
         state.lastGeneratedImage = result;
         state.lastGeneratedVideo = null;
-        HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, imageUrl: result.imageUrl, mediaType: 'image', type: 'edit', createdAt: result.createdAt });
+        HistoryManager.add({ id: result.id, prompt: result.prompt, imageBase64: result.imageBase64, imageUrl: result.imageUrl, imageMimeType: result.imageMimeType, imageOutputFormat: result.imageOutputFormat, mediaType: 'image', type: 'edit', createdAt: result.createdAt });
         if (TaskManager.activeTaskId === task.id) showResult(result);
         renderHistory();
         UI.showToast('图片编辑成功。', 'success');
@@ -817,11 +997,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function handleDownload() {
     if (state.lastGeneratedImage?.imageUrl) {
-      UI.downloadUrl(state.lastGeneratedImage.imageUrl, `nano-image-${Date.now()}.png`);
+      UI.downloadUrl(state.lastGeneratedImage.imageUrl, getImageFilename(state.lastGeneratedImage));
       return;
     }
     if (state.lastGeneratedImage?.imageBase64) {
-      UI.downloadImage(state.lastGeneratedImage.imageBase64, `nano-image-${Date.now()}.png`);
+      UI.downloadImage(state.lastGeneratedImage.imageBase64, getImageFilename(state.lastGeneratedImage));
       return;
     }
     const videoUrl = state.lastGeneratedVideo?.videoUrl;
@@ -894,10 +1074,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     imageModal.querySelector('.modal-backdrop').addEventListener('click', () => UI.hideModal('imageModal'));
     document.getElementById('modalDownloadBtn').addEventListener('click', () => {
       if (!modalImage.src) return;
+      const modalItem = state.modalImageItem || { imageUrl: modalImage.src };
       if (modalImage.src.startsWith('data:image/')) {
-        UI.downloadImage(modalImage.src, `nano-image-${Date.now()}.png`);
+        UI.downloadImage(modalImage.src, getImageFilename(modalItem));
       } else {
-        UI.downloadUrl(modalImage.src, `nano-image-${Date.now()}.png`);
+        UI.downloadUrl(modalImage.src, getImageFilename(modalItem));
       }
     });
     document.getElementById('modalEditBtn').addEventListener('click', () => {
@@ -927,8 +1108,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('resultContent').addEventListener('click', (event) => {
       if (event.target.classList.contains('result-image')) {
-        document.getElementById('modalImage').src = event.target.src;
-        UI.showModal('imageModal');
+        openImageModal(state.lastGeneratedImage || { imageUrl: event.target.src });
       }
     });
   }
@@ -978,8 +1158,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           state.lastGeneratedVideo = { videoUrl: item.videoUrl, prompt: item.prompt, createdAt: item.createdAt };
           showVideoResult(state.lastGeneratedVideo);
         } else {
-          document.getElementById('modalImage').src = getImageSource(item);
-          UI.showModal('imageModal');
+          openImageModal(item);
         }
       });
     });
@@ -1033,8 +1212,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           state.lastGeneratedVideo = historyItem;
           showVideoResult(historyItem);
         } else {
-          document.getElementById('modalImage').src = getImageSource(historyItem);
-          UI.showModal('imageModal');
+          openImageModal(historyItem);
         }
       });
     });

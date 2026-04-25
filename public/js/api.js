@@ -8,44 +8,24 @@ const ImageAPI = {
   },
 
   async request(endpoint, body, onProgress, stageLabels) {
-    let percent = 8;
-    let stageIndex = 0;
-    const stages = stageLabels || ['Connecting...', 'Generating...', 'Parsing response...', 'Completed'];
-
-    const pushProgress = (value, labelIndex = stageIndex) => {
-      percent = value;
-      stageIndex = Math.min(labelIndex, stages.length - 1);
-      onProgress?.({
-        stage: stages[stageIndex],
-        percent
-      });
+    const stages = stageLabels || ['Preparing request...', 'Waiting for upstream...', 'Processing response...', 'Completed'];
+    const pushProgress = (stage, percent, indeterminate = false) => {
+      onProgress?.({ stage, percent, indeterminate });
     };
 
-    pushProgress(8, 0);
-
-    const timer = window.setInterval(() => {
-      if (percent >= 82) {
-        return;
-      }
-
-      const nextPercent = Math.min(percent + 8, 82);
-      if (nextPercent >= 55) {
-        stageIndex = Math.min(1, stages.length - 1);
-      }
-      pushProgress(nextPercent, stageIndex);
-    }, 700);
+    pushProgress(stages[0], 10, false);
 
     let response;
     try {
       const isFormData = body instanceof FormData;
+      pushProgress(stages[1], 35, true);
       response = await fetch(endpoint, {
         method: 'POST',
         headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
         body: isFormData ? body : JSON.stringify(body)
       });
-      pushProgress(88, 2);
+      pushProgress(stages[2], 78, false);
     } finally {
-      window.clearInterval(timer);
     }
 
     let result;
@@ -68,25 +48,28 @@ const ImageAPI = {
       throw error;
     }
 
-    pushProgress(100, 3);
+    pushProgress(stages[3], 100, false);
     return result;
   },
 
-  async generateImage(prompt, apiKey, model, ratio, onProgress) {
+  async generateImage(prompt, apiKey, model, ratio, imageOptions, onProgress) {
     return this.request(
       '/api/generate',
-      { prompt, apiKey, model, ratio },
+      { prompt, apiKey, model, ratio, ...imageOptions },
       onProgress,
-      ['Connecting to Gemini...', 'Generating image...', 'Downloading image...', 'Image ready']
+      ['请求已发送', '正在等待上游生成', '正在处理图片结果', '图片已就绪']
     );
   },
 
-  async editImage({ prompt, apiKey, model, ratio, mainImageBase64, referenceImagesBase64, onProgress }) {
+  async editImage({ prompt, apiKey, model, ratio, quality, background, outputFormat, mainImageBase64, referenceImagesBase64, onProgress }) {
     const formData = new FormData();
     formData.append('prompt', prompt);
     formData.append('apiKey', apiKey);
     formData.append('model', model);
     formData.append('ratio', ratio);
+    if (quality) formData.append('quality', quality);
+    if (background) formData.append('background', background);
+    if (outputFormat) formData.append('outputFormat', outputFormat);
     if (mainImageBase64) {
       formData.append('mainImage', await this.dataUrlToBlob(mainImageBase64), 'main-image.png');
     }
@@ -97,7 +80,7 @@ const ImageAPI = {
       '/api/edit',
       formData,
       onProgress,
-      ['Connecting to Gemini...', 'Editing image...', 'Downloading image...', 'Image ready']
+      ['请求已发送', '正在等待上游编辑', '正在处理图片结果', '图片已就绪']
     );
   },
 
@@ -106,7 +89,7 @@ const ImageAPI = {
       '/api/generate-video',
       { prompt, apiKey, ratio, model },
       onProgress,
-      ['Connecting to Flow2API...', 'Generating video...', 'Resolving video URL...', 'Video ready']
+      ['请求已发送', '正在等待上游生成', '正在处理视频结果', '视频已就绪']
     );
   },
 
@@ -126,7 +109,7 @@ const ImageAPI = {
       '/api/generate-video-from-frames',
       formData,
       onProgress,
-      ['Connecting to Flow2API...', 'Generating transition video...', 'Resolving video URL...', 'Video ready']
+      ['请求已发送', '正在等待上游生成', '正在处理视频结果', '视频已就绪']
     );
   },
 
@@ -143,7 +126,7 @@ const ImageAPI = {
       '/api/generate-video-from-references',
       formData,
       onProgress,
-      ['Connecting to Flow2API...', 'Generating reference video...', 'Resolving video URL...', 'Video ready']
+      ['请求已发送', '正在等待上游生成', '正在处理视频结果', '视频已就绪']
     );
   },
 

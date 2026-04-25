@@ -19,6 +19,8 @@ const HistoryManager = {
       prompt: item.prompt,
       imageBase64: item.imageBase64 || null,
       imageUrl: item.imageUrl || null,
+      imageMimeType: item.imageMimeType || null,
+      imageOutputFormat: item.imageOutputFormat || null,
       videoUrl: item.videoUrl || null,
       type: item.type || 'generate',
       mediaType: item.mediaType || 'image',

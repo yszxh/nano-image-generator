@@ -1,7 +1,7 @@
 const FlowConfig = {
   image: {
     defaultRatio: 'landscape',
-    defaultVersion: 'gemini-3.1-flash',
+    defaultVersion: 'gemini-3.1-flash-preview',
     ratios: {
       portrait: { label: 'Portrait', sublabel: '9:16' },
       landscape: { label: 'Landscape', sublabel: '16:9' },
@@ -10,13 +10,6 @@ const FlowConfig = {
       'three-four': { label: '3:4', sublabel: '3:4' }
     },
     versions: {
-      'gemini-3.1-flash': {
-        label: 'Gemini 3.1 Flash',
-        hint: 'Latest fast image model',
-        prefix: 'gemini-3.1-flash-image',
-        suffix: '',
-        supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
-      },
       'gemini-3.1-flash-preview': {
         label: '（官方）gemini-3.1-flash-image-preview',
         hint: 'Official preview image model with arbitrary ratio support',
@@ -25,19 +18,13 @@ const FlowConfig = {
         exactModel: true,
         supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
       },
-      'gemini-3.0-pro': {
-        label: 'Gemini 3.0 Pro',
-        hint: 'Balanced quality model',
-        prefix: 'gemini-3.0-pro-image',
+      'gpt-image-2': {
+        label: 'gpt-image-2',
+        hint: 'OpenAI image API model',
+        prefix: 'gpt-image-2',
         suffix: '',
+        exactModel: true,
         supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
-      },
-      'imagen-4.0-preview': {
-        label: 'Imagen 4 Preview',
-        hint: 'Preview model for landscape and portrait',
-        prefix: 'imagen-4.0-generate-preview',
-        suffix: '',
-        supportedRatios: ['portrait', 'landscape']
       }
     }
   },
