@@ -1,0 +1,837 @@
+/* =================================================================
+   TECH SKIN — HUD frame + Holographic ambience
+   Loaded AFTER style.css to override visual layer.
+   Touch nothing structural; only colors / borders / glows / typography.
+   ================================================================= */
+
+:root {
+  /* Snappier transitions — override style.css defaults to fix click latency.
+     Original was 0.5s spring with overshoot, perceived as ~600ms lag.
+     Hover-heavy elements get a tighter 120ms via the rules below. */
+  --transition: all 0.18s ease-out;
+  --spring: transform 0.14s ease-out, background-color 0.14s ease-out, color 0.14s ease-out, border-color 0.14s ease-out, box-shadow 0.14s ease-out;
+  --hud-cyan: #00d4ff;
+  --hud-cyan-soft: #38bdf8;
+  --hud-cyan-glow: rgba(0, 212, 255, 0.55);
+  --hud-purple: #7c3aed;
+  --hud-magenta: #c026d3;
+  --hud-orange: #ff8a3d;
+  --hud-green: #22c55e;
+  --hud-grid: rgba(0, 212, 255, 0.06);
+  --hud-line: rgba(0, 212, 255, 0.18);
+  --hud-line-strong: rgba(0, 212, 255, 0.45);
+  --hud-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Consolas, 'Roboto Mono', 'Menlo', monospace;
+}
+
+/* ---------- DARK theme: deep space ---------- */
+[data-theme="dark"] {
+  --bg-primary: #050810;
+  --bg-secondary: #0b1220;
+  --bg-tertiary: #111c30;
+  --text-primary: #e6f6ff;
+  --text-secondary: #8aa9c4;
+  --text-tertiary: #4f6b85;
+  --border-color: rgba(0, 212, 255, 0.12);
+  --card-bg: rgba(11, 18, 32, 0.72);
+  --input-bg: rgba(8, 14, 26, 0.85);
+  --hover-bg: rgba(0, 212, 255, 0.08);
+  --glass-bg: rgba(11, 18, 32, 0.55);
+  --glass-border: rgba(0, 212, 255, 0.15);
+  --primary: var(--hud-cyan);
+  --primary-hover: #38e2ff;
+  --primary-light: var(--hud-cyan-soft);
+}
+
+/* ---------- LIGHT theme: icy HUD (boosted) ---------- */
+[data-theme="light"] {
+  --bg-primary: #c8e3f5;
+  --bg-secondary: #b5d6ec;
+  --bg-tertiary: #9ec5e0;
+  --text-primary: #03203a;
+  --text-secondary: #14466e;
+  --text-tertiary: #4a7ba0;
+  --border-color: rgba(2, 132, 199, 0.30);
+  --card-bg: rgba(232, 245, 254, 0.78);
+  --input-bg: rgba(255, 255, 255, 0.85);
+  --hover-bg: rgba(2, 132, 199, 0.12);
+  --glass-bg: rgba(232, 245, 254, 0.65);
+  --glass-border: rgba(2, 132, 199, 0.30);
+  --primary: #0369a1;
+  --primary-hover: #075985;
+  --primary-light: #0ea5e9;
+  --hud-line: rgba(2, 132, 199, 0.40);
+  --hud-line-strong: rgba(2, 132, 199, 0.65);
+  --hud-grid: rgba(2, 132, 199, 0.16);
+  --hud-cyan-glow: rgba(2, 132, 199, 0.45);
+}
+
+/* ---------- Body / ambient holographic background ---------- */
+body {
+  background:
+    radial-gradient(ellipse 80% 60% at 75% -10%, rgba(124, 58, 237, 0.18), transparent 60%),
+    radial-gradient(ellipse 60% 50% at -5% 105%, rgba(0, 212, 255, 0.14), transparent 55%),
+    var(--bg-primary);
+  position: relative;
+  overflow-x: hidden;
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(ellipse 80% 60% at 75% -10%, rgba(124, 58, 237, 0.22), transparent 60%),
+    radial-gradient(ellipse 60% 50% at -5% 105%, rgba(2, 132, 199, 0.28), transparent 55%),
+    var(--bg-primary);
+}
+
+.ambient-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ambient-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--hud-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--hud-grid) 1px, transparent 1px);
+  background-size: 56px 56px, 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse at center, black 25%, transparent 80%);
+          mask-image: radial-gradient(ellipse at center, black 25%, transparent 80%);
+  opacity: 0.65;
+}
+
+.ambient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(55px);
+  opacity: 0.55;
+  animation: orbDrift 28s ease-in-out infinite;
+  will-change: transform;
+  transform: translateZ(0); /* promote to own GPU layer */
+}
+.ambient-orb-1 {
+  width: 480px; height: 480px;
+  top: -140px; left: -120px;
+  background: radial-gradient(circle, rgba(0, 212, 255, 0.55), transparent 65%);
+}
+.ambient-orb-2 {
+  width: 540px; height: 540px;
+  top: 28%; right: -180px;
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.50), transparent 65%);
+  animation-delay: -7s;
+}
+.ambient-orb-3 {
+  width: 380px; height: 380px;
+  bottom: -140px; left: 32%;
+  background: radial-gradient(circle, rgba(192, 38, 211, 0.35), transparent 65%);
+  animation-delay: -14s;
+}
+
+/* Light orbs: stronger colors WITHOUT mix-blend-mode (too GPU-heavy) */
+[data-theme="light"] .ambient-orb { opacity: 0.55; }
+[data-theme="light"] .ambient-orb-1 {
+  background: radial-gradient(circle, rgba(2, 132, 199, 0.65), transparent 65%);
+}
+[data-theme="light"] .ambient-orb-2 {
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.55), transparent 65%);
+}
+[data-theme="light"] .ambient-orb-3 {
+  background: radial-gradient(circle, rgba(192, 38, 211, 0.40), transparent 65%);
+}
+
+@keyframes orbDrift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  33%      { transform: translate3d(40px, -30px, 0) scale(1.08); }
+  66%      { transform: translate3d(-30px, 40px, 0) scale(0.94); }
+}
+
+/* ---------- Header ---------- */
+.header {
+  border-bottom: 1px solid var(--hud-line);
+  padding-bottom: 14px;
+  margin-bottom: 24px;
+  position: relative;
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 140px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--hud-cyan), transparent);
+  box-shadow: 0 0 8px var(--hud-cyan-glow);
+}
+
+.logo {
+  font-family: var(--hud-mono);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: linear-gradient(135deg, var(--text-primary) 0%, var(--hud-cyan) 100%);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+  text-shadow: none;
+}
+
+.system-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 14px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid var(--hud-line);
+  font-family: var(--hud-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  color: var(--primary);
+  text-transform: uppercase;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.system-status::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--hud-green);
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.65);
+  animation: statusPulse 2s ease-out infinite;
+}
+
+@keyframes statusPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+@media (max-width: 720px) {
+  .system-status { display: none; }
+}
+
+/* ---------- HUD panels (cards) ---------- */
+.input-panel,
+.result-panel,
+.task-panel,
+.history-panel {
+  border-radius: 10px;
+  border: 1px solid var(--hud-line);
+  background: var(--card-bg);
+  /* Lighter backdrop-filter: only on the 2 main panels keeps the glass look
+     without the cost. Side panels skip it (overridden below). */
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 255, 0.04),
+    0 24px 60px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  position: relative;
+}
+
+/* Side panels: drop backdrop-filter entirely (they sit on top of cards already) */
+.task-panel,
+.history-panel {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+[data-theme="light"] .input-panel,
+[data-theme="light"] .result-panel,
+[data-theme="light"] .task-panel,
+[data-theme="light"] .history-panel {
+  border-color: rgba(2, 132, 199, 0.35);
+  box-shadow:
+    0 0 0 1px rgba(2, 132, 199, 0.10),
+    0 18px 48px rgba(2, 70, 130, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+/* HUD corner-bracket decorations */
+.input-panel::before, .result-panel::before,
+.task-panel::before, .history-panel::before,
+.input-panel::after,  .result-panel::after,
+.task-panel::after,   .history-panel::after {
+  content: '';
+  position: absolute;
+  width: 22px; height: 22px;
+  pointer-events: none;
+}
+.input-panel::before, .result-panel::before,
+.task-panel::before, .history-panel::before {
+  top: -1px; left: -1px;
+  border-top: 1px solid var(--primary);
+  border-left: 1px solid var(--primary);
+  border-top-left-radius: 10px;
+  filter: drop-shadow(0 0 6px var(--hud-cyan-glow));
+}
+.input-panel::after, .result-panel::after,
+.task-panel::after, .history-panel::after {
+  bottom: -1px; right: -1px;
+  border-bottom: 1px solid var(--primary);
+  border-right: 1px solid var(--primary);
+  border-bottom-right-radius: 10px;
+  filter: drop-shadow(0 0 6px var(--hud-cyan-glow));
+}
+
+/* ---------- Tabs ---------- */
+.tabs {
+  background: rgba(0, 212, 255, 0.04);
+  border: 1px solid var(--hud-line);
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.tab-btn {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.06em;
+  font-size: 0.82rem;
+  border-radius: 6px;
+  text-transform: uppercase;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.tab-btn:hover { color: var(--text-primary); }
+
+.tab-btn.active {
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.18), rgba(0, 212, 255, 0.06));
+  color: var(--primary);
+  border: 1px solid rgba(0, 212, 255, 0.4);
+  box-shadow:
+    0 0 22px rgba(0, 212, 255, 0.20),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  text-shadow: 0 0 12px rgba(0, 212, 255, 0.45);
+  font-weight: 600;
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  border-radius: 6px;
+  letter-spacing: 0.02em;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #00d4ff 0%, #0284c7 100%);
+  color: #001824;
+  font-weight: 700;
+  border: 1px solid rgba(0, 212, 255, 0.6);
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 255, 0.20),
+    0 8px 24px rgba(0, 212, 255, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  text-transform: uppercase;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, #38e2ff 0%, #00d4ff 100%);
+  box-shadow:
+    0 0 0 1px var(--hud-cyan),
+    0 12px 32px rgba(0, 212, 255, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transform: translateY(-1px);
+}
+
+.btn-primary::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -100%;
+  width: 60%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  transition: left 0.6s ease;
+  pointer-events: none;
+}
+.btn-primary:hover::before { left: 130%; }
+
+.btn-primary:disabled {
+  background: rgba(0, 212, 255, 0.10);
+  color: var(--text-tertiary);
+  border-color: var(--hud-line);
+  box-shadow: none;
+  text-shadow: none;
+}
+
+.btn-large {
+  border-radius: 8px;
+  padding: 14px 24px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+}
+
+.btn-secondary {
+  background: rgba(0, 212, 255, 0.06);
+  color: var(--text-primary);
+  border: 1px solid var(--hud-line);
+}
+
+.btn-secondary:hover {
+  background: rgba(0, 212, 255, 0.12);
+  border-color: var(--hud-line-strong);
+  color: var(--primary);
+}
+
+.btn-icon {
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid var(--hud-line);
+  border-radius: 6px;
+}
+.btn-icon:hover {
+  background: rgba(0, 212, 255, 0.14);
+  border-color: var(--hud-line-strong);
+}
+
+.btn-text:hover { color: var(--primary); }
+
+/* ---------- Inputs / textareas / selects ---------- */
+.prompt-input,
+.input,
+select.input {
+  background: var(--input-bg);
+  border: 1px solid var(--hud-line);
+  border-radius: 6px;
+  color: var(--text-primary);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.prompt-input:focus,
+.input:focus,
+select.input:focus {
+  border-color: var(--primary);
+  box-shadow:
+    0 0 0 3px rgba(0, 212, 255, 0.18),
+    0 0 24px rgba(0, 212, 255, 0.18),
+    inset 0 0 0 1px rgba(0, 212, 255, 0.30);
+  background: var(--input-bg);
+}
+
+/* Form labels become HUD-style mono caps */
+.form-group label {
+  font-family: var(--hud-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.input-hint {
+  font-family: var(--hud-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+}
+
+/* ---------- Template tags ---------- */
+.template-tag {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid var(--hud-line);
+  border-radius: 4px;
+  font-family: var(--hud-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  padding: 6px 12px;
+}
+
+.template-tag:hover {
+  background: rgba(0, 212, 255, 0.14);
+  border-color: var(--primary);
+  color: var(--primary);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.25);
+}
+
+/* ---------- Ratio / mode cards ---------- */
+.ratio-card,
+.video-ratio-card,
+.video-mode-card {
+  background: rgba(0, 212, 255, 0.04);
+  border: 1px solid var(--hud-line);
+  border-radius: 8px;
+}
+
+.ratio-card:hover,
+.video-ratio-card:hover,
+.video-mode-card:hover {
+  background: rgba(0, 212, 255, 0.08);
+  border-color: var(--hud-line-strong);
+}
+
+.ratio-card.active,
+.video-ratio-card.active,
+.video-mode-card.active {
+  background: rgba(0, 212, 255, 0.12);
+  border-color: var(--primary);
+  box-shadow:
+    0 0 0 1px var(--primary),
+    0 0 24px rgba(0, 212, 255, 0.25),
+    inset 0 0 16px rgba(0, 212, 255, 0.08);
+}
+
+.ratio-card.active .ratio-name,
+.video-ratio-card.active .ratio-name {
+  color: var(--primary);
+  text-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+}
+
+.ratio-card.active .ratio-preview,
+.video-ratio-card.active .ratio-preview {
+  background: var(--primary);
+  box-shadow: 0 0 12px rgba(0, 212, 255, 0.7);
+}
+
+.ratio-name { font-weight: 600; }
+.ratio-sub {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.08em;
+}
+
+.video-mode-card strong { font-family: var(--hud-mono); letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.85rem; }
+
+/* ---------- Upload / frame zones ---------- */
+.upload-zone,
+.frame-upload-zone {
+  border: 1px dashed var(--hud-line-strong);
+  border-radius: 10px;
+  background: rgba(0, 212, 255, 0.025);
+  position: relative;
+}
+
+.upload-zone::before,
+.frame-upload-zone::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image:
+    linear-gradient(var(--hud-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--hud-grid) 1px, transparent 1px);
+  background-size: 18px 18px;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.upload-zone:hover,
+.upload-zone.dragover,
+.frame-upload-zone:hover,
+.frame-upload-zone.dragover {
+  border-color: var(--primary);
+  background: rgba(0, 212, 255, 0.08);
+  box-shadow:
+    inset 0 0 24px rgba(0, 212, 255, 0.12),
+    0 0 0 1px rgba(0, 212, 255, 0.25);
+}
+
+/* ---------- Result viewport ---------- */
+.result-content {
+  background: rgba(0, 212, 255, 0.025);
+  border: 1px solid var(--hud-line);
+  border-radius: 10px;
+  position: relative;
+}
+
+.result-content::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image:
+    linear-gradient(var(--hud-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--hud-grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+  opacity: 0.4;
+  z-index: 0;
+}
+
+.result-content::after {
+  content: 'PREVIEW · LIVE';
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  font-family: var(--hud-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  color: var(--primary);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.result-content > * { position: relative; z-index: 1; }
+
+/* ---------- Result info / placeholder ---------- */
+.result-info {
+  background: rgba(0, 212, 255, 0.04);
+  border: 1px solid var(--hud-line);
+  border-radius: 6px;
+}
+.info-label {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+}
+
+/* ---------- Section headers ---------- */
+.task-panel-header h3,
+.history-header h3,
+.result-header h3 {
+  font-family: var(--hud-mono);
+  font-size: 0.82rem !important;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.task-count {
+  font-family: var(--hud-mono);
+  color: var(--primary);
+  letter-spacing: 0.10em;
+  font-size: 0.78rem;
+}
+
+.task-panel-header,
+.history-header {
+  border-bottom: 1px solid var(--hud-line);
+}
+
+/* ---------- Task cards ---------- */
+.task-card {
+  background: rgba(0, 212, 255, 0.04);
+  border: 1px solid var(--hud-line);
+  border-radius: 6px;
+}
+
+.task-card:hover {
+  background: rgba(0, 212, 255, 0.10);
+  border-color: var(--hud-line-strong);
+}
+
+.task-card.active {
+  background: rgba(0, 212, 255, 0.10);
+  box-shadow: 0 0 0 1px var(--primary), 0 0 18px rgba(0, 212, 255, 0.20);
+}
+
+.task-card.running {
+  border-color: var(--primary);
+  border-left: 3px solid var(--primary);
+  box-shadow: 0 0 16px rgba(0, 212, 255, 0.20), inset 0 0 12px rgba(0, 212, 255, 0.05);
+}
+
+.task-card.completed { border-left-color: var(--hud-green); }
+.task-card.failed    { border-left-color: var(--hud-orange); }
+
+.task-type,
+.task-status {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.12em;
+}
+
+.task-status {
+  border-radius: 3px;
+  background: rgba(0, 212, 255, 0.08);
+  color: var(--primary);
+  border: 1px solid var(--hud-line);
+}
+
+.task-card.running .task-status {
+  background: var(--primary);
+  color: #001824;
+  border-color: var(--primary);
+}
+
+.task-progress {
+  background: rgba(0, 212, 255, 0.08);
+}
+.task-progress-fill {
+  background: linear-gradient(90deg, var(--hud-cyan), var(--hud-purple));
+  box-shadow: 0 0 10px rgba(0, 212, 255, 0.45);
+}
+
+/* ---------- History items ---------- */
+.history-item {
+  border-radius: 6px;
+  border: 1px solid var(--hud-line);
+}
+.history-item:hover {
+  border-color: var(--primary);
+  box-shadow: 0 0 24px rgba(0, 212, 255, 0.30);
+}
+
+/* ---------- Generation progress (recolor only) ---------- */
+.generation-core {
+  background: linear-gradient(145deg, var(--hud-cyan), var(--hud-purple)) !important;
+  box-shadow:
+    0 0 40px rgba(0, 212, 255, 0.55),
+    0 0 80px rgba(124, 58, 237, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45) !important;
+  font-family: var(--hud-mono);
+}
+
+.generation-ring {
+  border-top-color: var(--hud-cyan) !important;
+  border-right-color: var(--hud-purple) !important;
+}
+
+.progress-fill {
+  background: linear-gradient(90deg, var(--hud-cyan), var(--hud-purple));
+  box-shadow: 0 0 12px rgba(0, 212, 255, 0.5);
+}
+
+.progress-elapsed {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.12em;
+  background: rgba(0, 212, 255, 0.08);
+  color: var(--primary);
+  border: 1px solid var(--hud-line);
+}
+
+.progress-title {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+
+/* ---------- Modal backdrop: lighter blur to speed up open ---------- */
+.modal-backdrop {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* ---------- Modal ---------- */
+.modal-content {
+  border-radius: 12px;
+  border: 1px solid var(--hud-line-strong);
+  background: var(--card-bg);
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 255, 0.15),
+    0 32px 80px rgba(0, 0, 0, 0.55),
+    0 0 60px rgba(0, 212, 255, 0.10);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+[data-theme="light"] .modal-content {
+  box-shadow:
+    0 0 0 1px rgba(2, 132, 199, 0.18),
+    0 32px 80px rgba(2, 132, 199, 0.18);
+}
+
+.modal-header h3 {
+  font-family: var(--hud-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.modal-close {
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid var(--hud-line);
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.modal-close:hover {
+  background: rgba(255, 138, 61, 0.18);
+  border-color: var(--hud-orange);
+  color: var(--hud-orange);
+}
+
+/* ---------- Toasts ---------- */
+.toast {
+  border-radius: 6px;
+  border: 1px solid var(--hud-line-strong);
+  border-left-width: 3px;
+  font-family: inherit;
+  font-size: 0.88rem;
+}
+
+/* ---------- Theme toggle icon ---------- */
+.theme-icon {
+  filter: drop-shadow(0 0 6px var(--hud-cyan-glow));
+}
+
+/* ---------- Scrollbars (webkit) ---------- */
+.task-panel::-webkit-scrollbar,
+.history-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.task-panel::-webkit-scrollbar-thumb,
+.history-panel::-webkit-scrollbar-thumb {
+  background: var(--hud-line-strong);
+  border-radius: 3px;
+}
+.task-panel::-webkit-scrollbar-thumb:hover,
+.history-panel::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
+}
+
+/* ---------- Hover responsiveness pass ----------
+   Drop scale-on-hover (still feels laggy due to compositor work above
+   backdrop-filter parents). Keep :active scale-down for tactile feedback.
+   Tighter 120ms transition for instant visual response. */
+.ratio-card,
+.video-ratio-card,
+.video-mode-card,
+.template-tag,
+.history-item,
+.task-card,
+.tab-btn,
+.btn,
+.btn-icon,
+.btn-secondary,
+.btn-primary,
+.upload-zone,
+.upload-zone-small,
+.frame-upload-zone {
+  transition:
+    background-color 0.12s ease-out,
+    border-color 0.12s ease-out,
+    box-shadow 0.12s ease-out,
+    color 0.12s ease-out,
+    transform 0.10s ease-out !important;
+}
+
+.ratio-card:hover,
+.video-ratio-card:hover,
+.video-mode-card:hover,
+.template-tag:hover,
+.history-item:hover,
+.task-card:hover,
+.btn-icon:hover,
+.btn-primary:hover,
+.btn-secondary:hover,
+.upload-zone:hover,
+.upload-zone.dragover,
+.frame-upload-zone:hover,
+.frame-upload-zone.dragover {
+  transform: none !important;
+}
+
+/* Subtle press feedback only on click — short and snappy */
+.ratio-card:active,
+.video-ratio-card:active,
+.video-mode-card:active,
+.template-tag:active,
+.btn:active,
+.btn-icon:active {
+  transform: scale(0.97) !important;
+}
+
+/* ---------- Reduced motion friendly ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .ambient-orb { animation: none; }
+  .system-status::before { animation: none; }
+}
