@@ -80,6 +80,12 @@ const UI = {
   truncateText(text, maxLength = 50) {
     if (text.length <= maxLength) return text;
     return text.substring(0, maxLength) + '...';
+  },
+
+  escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
   }
 };
 

@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import http from 'http';
-import https from 'https';
+import rateLimit from 'express-rate-limit';
+import compression from 'compression';
 import multer from 'multer';
 import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
@@ -50,6 +50,15 @@ function imageCacheSet(key, contentType, buffer) {
   }
   imageCache.set(key, { contentType, buffer, ts: Date.now() });
 }
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of imageCache) {
+    if (now - entry.ts > IMAGE_CACHE_TTL_MS) {
+      imageCache.delete(key);
+    }
+  }
+}, IMAGE_CACHE_TTL_MS);
+
 function cacheGeneratedImageBuffer(buffer, contentType) {
   const cacheKey = `generated:${uuidv4()}`;
   imageCacheSet(cacheKey, contentType, buffer);
@@ -90,7 +99,31 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 }
 });
 
-app.use(cors());
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+  : [];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  }
+}));
+app.use(compression());
+
+const rateLimitPerMinute = Number(process.env.RATE_LIMIT_PER_MINUTE || 30);
+if (rateLimitPerMinute > 0) {
+  app.use('/api/', rateLimit({
+    windowMs: 60 * 1000,
+    max: rateLimitPerMinute,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'Too many requests, please try again later.', code: 'rate_limited' }
+  }));
+}
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -104,56 +137,6 @@ function clearAbortTimeout(timeoutId) {
   if (timeoutId) {
     clearTimeout(timeoutId);
   }
-}
-
-function downloadBinaryUrl(url, timeoutMs = REQUEST_TIMEOUT_MS, redirectsLeft = 3) {
-  return new Promise((resolve, reject) => {
-    const sanitizedUrl = sanitizeUrl(url);
-    if (!sanitizedUrl || sanitizedUrl.startsWith('data:')) {
-      reject(new Error('Invalid remote media URL.'));
-      return;
-    }
-
-    const parsedUrl = new URL(sanitizedUrl);
-    const transport = parsedUrl.protocol === 'https:' ? https : http;
-    const request = transport.get(parsedUrl, {
-      headers: {
-        'Connection': 'close',
-        'User-Agent': 'nano-image-generator/1.0'
-      }
-    }, (response) => {
-      const statusCode = response.statusCode || 0;
-
-      if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location && redirectsLeft > 0) {
-        response.resume();
-        resolve(downloadBinaryUrl(response.headers.location, timeoutMs, redirectsLeft - 1));
-        return;
-      }
-
-      if (statusCode < 200 || statusCode >= 300) {
-        response.resume();
-        reject(new Error(`Image download failed (${statusCode})`));
-        return;
-      }
-
-      const chunks = [];
-      response.on('data', (chunk) => chunks.push(chunk));
-      response.on('end', () => {
-        resolve({
-          buffer: Buffer.concat(chunks),
-          contentType: response.headers['content-type'] || 'image/png'
-        });
-      });
-    });
-
-    request.setTimeout(timeoutMs, () => {
-      request.destroy(new Error('Image download timed out.'));
-    });
-
-    request.on('error', (error) => {
-      reject(error);
-    });
-  });
 }
 
 /**
@@ -1274,7 +1257,7 @@ function buildImageMessages(prompt, imageSources = []) {
   return [{ role: 'user', content }];
 }
 
-async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
+async function proxyMediaRequest(req, res, url, defaultContentType, fileName, depth = 0) {
   const proxyStartedAt = Date.now();
   const proxyRequestId = uuidv4();
   const sanitizedUrl = sanitizeUrl(url);
@@ -1329,7 +1312,8 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
     const upstreamStartedAt = Date.now();
     upstream = await fetch(sanitizedUrl, {
       signal: controller.signal,
-      headers: upstreamHeaders
+      headers: upstreamHeaders,
+      redirect: 'manual'
     });
     console.log('[Proxy Media Headers]', JSON.stringify({
       requestId: proxyRequestId,
@@ -1348,6 +1332,25 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
   }
 
   clearAbortTimeout(timeoutId);
+
+  if ([301, 302, 303, 307, 308].includes(upstream.status)) {
+    const location = upstream.headers.get('location');
+    if (!location) {
+      return res.status(502).json({ error: 'Upstream redirect without Location header.' });
+    }
+    if (depth >= 3) {
+      return res.status(502).json({ error: 'Too many redirects.' });
+    }
+    try {
+      const redirectHost = new URL(location).hostname.toLowerCase();
+      if (!PROXY_ALLOWED_HOSTS.has(redirectHost)) {
+        return res.status(403).json({ error: `Redirect target host not allowed: ${redirectHost}` });
+      }
+    } catch {
+      return res.status(400).json({ error: 'Invalid redirect URL.' });
+    }
+    return proxyMediaRequest(req, res, location, defaultContentType, fileName, depth + 1);
+  }
 
   if (!upstream.ok) {
     const errorText = await safeReadErrorText(upstream);
@@ -1403,8 +1406,9 @@ async function proxyMediaRequest(req, res, url, defaultContentType, fileName) {
         totalMs: Date.now() - proxyStartedAt
       }));
       return res.send(buffer);
-    } catch {
-      // buffer 失败则回退到流式
+    } catch (err) {
+      console.error('[Proxy] Failed to buffer image:', err.message);
+      return res.status(502).json({ error: 'Failed to buffer upstream image response.' });
     }
   }
 
@@ -1415,8 +1419,6 @@ app.get('/api/config/status', (req, res) => {
   const configuredKey = withResolvedApiKey('');
   res.json({
     hasServerKey: Boolean(configuredKey),
-    flow2apiBaseUrl: FLOW2API_BASE_URL,
-    geminiBaseUrl: GEMINI_BASE_URL,
     message: configuredKey ? 'Server-side API key is configured.' : 'Configure an API key in the browser or server environment.'
   });
 });

@@ -207,7 +207,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           <span class="task-type">${typeLabels[task.type] || task.type}</span>
           <span class="task-status">${statusLabels[task.status] || task.status}</span>
         </div>
-        <div class="task-prompt">${task.prompt}</div>
+        <div class="task-prompt">${UI.escapeHtml(task.prompt)}</div>
         ${task.status === 'running' ? `<div class="task-progress"><div class="task-progress-fill" style="width: ${task.progress}%"></div></div>` : ''}
         <button class="task-delete" data-id="${task.id}">×</button>
       </div>
@@ -797,10 +797,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         URL.revokeObjectURL(state.lastVideoBlobUrl);
         state.lastVideoBlobUrl = null;
       }
-      const proxyUrl = buildVideoProxyUrl(result.videoUrl);
-      const response = { ok: true };
-      const blobUrl = proxyUrl;
-      if (!response.ok) throw new Error('视频加载失败。');
+      const blobUrl = buildVideoProxyUrl(result.videoUrl);
       document.getElementById('resultContent').innerHTML = `
         <video class="result-video" controls autoplay loop playsinline preload="metadata">
           <source src="${blobUrl}" type="video/mp4">
@@ -1007,8 +1004,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const videoUrl = state.lastGeneratedVideo?.videoUrl;
     if (!videoUrl) return;
     try {
-      const response = { ok: true };
-      if (!response.ok) throw new Error('下载失败。');
       const blobUrl = buildVideoProxyUrl(videoUrl);
       const link = document.createElement('a');
       link.href = blobUrl;
@@ -1016,7 +1011,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      void blobUrl;
     } catch (error) {
       UI.showToast(error.message || '视频下载失败。', 'error');
     }
@@ -1137,7 +1131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       return `
         <div class="history-item" data-id="${item.id}" draggable="true">
-          <img src="${getImageSource(item)}" alt="${UI.truncateText(item.prompt, 16)}">
+          <img src="${getImageSource(item)}" alt="${UI.escapeHtml(UI.truncateText(item.prompt, 16))}">
           <div class="history-item-overlay">
             <div class="history-item-actions">
               <button class="history-view-btn" data-id="${item.id}">查看</button>

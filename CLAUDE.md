@@ -57,7 +57,7 @@ Vanilla JS, no framework or bundler. Scripts are loaded in order via `<script>` 
 1. **`flow-config.js`** — `window.FlowConfig`: model/ratio configuration registry. `buildImageModel(versionId, ratio)` constructs the model string sent to the API. `getVideoModel(group, modelId, ratio)` does the same for video.
 2. **`api.js`** — `window.ImageAPI`: thin fetch wrapper around the backend `/api/*` routes. Simulates progress with a polling timer. All methods return `result` from the JSON response.
 3. **`ui.js`** — `window.UI`: shared UI helpers (toasts, modals, theme toggling).
-4. **`history.js`** — `window.History`: localStorage-based persistence of generated images/videos (`nano_history` key, capped at 50 entries).
+4. **`history.js`** — `window.History`: localStorage-based persistence of generated images/videos (`nano_image_history` key, capped at 30 entries).
 5. **`app.js`** — main entry point. Manages a `state` object and a `TaskManager` (max 6 concurrent tasks). Wires all UI events and calls `ImageAPI` methods.
 
 ### State & localStorage keys

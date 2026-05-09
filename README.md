@@ -69,10 +69,11 @@ nano-image-generator/
     ├── css/
     │   └── style.css     # 样式文件
     └── js/
-        ├── api.js        # API 调用
-        ├── history.js    # 历史记录
-        ├── ui.js         # UI 工具
-        └── app.js        # 主逻辑
+        ├── flow-config.js  # 模型/比例配置
+        ├── api.js          # API 调用
+        ├── history.js      # 历史记录
+        ├── ui.js           # UI 工具
+        └── app.js          # 主逻辑
 ```
 
 ## 使用说明
