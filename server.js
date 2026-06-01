@@ -94,6 +94,11 @@ const OPENAI_IMAGE_SIZE_MAP = {
   'three-four': '1152x1536'
 };
 
+const VIDEO_ASPECT_RATIO_MAP = {
+  portrait: '9:16',
+  landscape: '16:9'
+};
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }
@@ -496,6 +501,10 @@ function resolveImageAspectRatio(ratio, model) {
 
 function resolveOpenAiImageSize(ratio) {
   return OPENAI_IMAGE_SIZE_MAP[ratio] || OPENAI_IMAGE_SIZE_MAP.square;
+}
+
+function resolveVideoAspectRatio(ratio) {
+  return VIDEO_ASPECT_RATIO_MAP[ratio] || VIDEO_ASPECT_RATIO_MAP.landscape;
 }
 
 function getFlow2ApiRestBaseUrl() {
@@ -1143,7 +1152,7 @@ async function callOpenAiImageEdit({ prompt, apiKey, model, size, quality, backg
   };
 }
 
-async function callFlow2Api({ messages, apiKey, model, type }) {
+async function callFlow2Api({ messages, apiKey, model, type, parameters }) {
   const resolvedApiKey = withResolvedApiKey(apiKey);
   if (!resolvedApiKey) {
     throw new Error('Missing Flow2API key.');
@@ -1154,6 +1163,10 @@ async function callFlow2Api({ messages, apiKey, model, type }) {
     stream: true,
     messages
   };
+
+  if (parameters && Object.keys(parameters).length > 0) {
+    payload.parameters = parameters;
+  }
 
   let response;
   const retryState = { attempts: 0 };
@@ -1558,7 +1571,13 @@ app.post('/api/generate-video', async (req, res) => {
     }
 
     const messages = [{ role: 'user', content: prompt }];
-    const result = await callFlow2Api({ messages, apiKey, model, type: 'video' });
+    const result = await callFlow2Api({
+      messages,
+      apiKey,
+      model,
+      type: 'video',
+      parameters: { aspectRatio: resolveVideoAspectRatio(ratio) }
+    });
 
     res.json({
       success: true,
@@ -1603,7 +1622,13 @@ app.post('/api/generate-video-from-frames', upload.fields([
     }
 
     const messages = buildImageMessages(prompt, [startFrameBase64, endFrameBase64].filter(Boolean));
-    const result = await callFlow2Api({ messages, apiKey, model, type: 'video' });
+    const result = await callFlow2Api({
+      messages,
+      apiKey,
+      model,
+      type: 'video',
+      parameters: { aspectRatio: resolveVideoAspectRatio(ratio) }
+    });
 
     res.json({
       success: true,
@@ -1652,7 +1677,13 @@ app.post('/api/generate-video-from-references', upload.fields([
     }
 
     const messages = buildImageMessages(prompt, referenceImages);
-    const result = await callFlow2Api({ messages, apiKey, model, type: 'video' });
+    const result = await callFlow2Api({
+      messages,
+      apiKey,
+      model,
+      type: 'video',
+      parameters: { aspectRatio: resolveVideoAspectRatio(ratio) }
+    });
 
     res.json({
       success: true,
