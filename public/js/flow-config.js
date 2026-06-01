@@ -31,42 +31,26 @@ const FlowConfig = {
 
   video: {
     defaultRatio: 'landscape',
-    defaultTextModel: 'veo-31-fast',
-    defaultFrameModel: 'veo-31-i2v-fast',
+    defaultTextModel: 'veo-31-4k',
+    defaultFrameModel: 'veo-31-4k',
     defaultReferenceModel: 'veo-31-r2v-fast',
     textModels: {
-      'veo-31-fast': {
-        label: 'Veo 3.1 Fast',
-        hint: 'Recommended for first-pass generation',
+      'veo-31-4k': {
+        label: 'Veo 3.1 4K',
+        hint: '4K text-to-video generation',
         models: {
-          landscape: 'veo_3_1_t2v_fast_landscape',
-          portrait: 'veo_3_1_t2v_fast_portrait'
-        }
-      },
-      'veo-31-quality': {
-        label: 'Veo 3.1 Quality',
-        hint: 'Slower but more polished',
-        models: {
-          landscape: 'veo_3_1_t2v_landscape',
-          portrait: 'veo_3_1_t2v_portrait'
+          landscape: 'veo_3_1-4K',
+          portrait: 'veo_3_1-4K'
         }
       }
     },
     frameModels: {
-      'veo-31-i2v-fast': {
-        label: 'Veo 3.1 I2V Fast',
-        hint: 'Single frame or start/end frames',
+      'veo-31-4k': {
+        label: 'Veo 3.1 4K',
+        hint: '4K image-to-video generation',
         models: {
-          landscape: 'veo_3_1_i2v_s_fast_fl',
-          portrait: 'veo_3_1_i2v_s_fast_portrait_fl'
-        }
-      },
-      'veo-31-i2v-quality': {
-        label: 'Veo 3.1 I2V Quality',
-        hint: 'Better detail for transitions',
-        models: {
-          landscape: 'veo_3_1_i2v_s_landscape',
-          portrait: 'veo_3_1_i2v_s_portrait'
+          landscape: 'veo_3_1-4K',
+          portrait: 'veo_3_1-4K'
         }
       }
     },

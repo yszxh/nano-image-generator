@@ -67,12 +67,12 @@ function cacheGeneratedImageBuffer(buffer, contentType) {
 const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 const DEFAULT_VIDEO_MODELS = {
   text2video: {
-    landscape: 'veo_3_1_t2v_fast_landscape',
-    portrait: 'veo_3_1_t2v_fast_portrait'
+    landscape: 'veo_3_1-4K',
+    portrait: 'veo_3_1-4K'
   },
   frame2video: {
-    landscape: 'veo_3_1_i2v_s_fast_fl',
-    portrait: 'veo_3_1_i2v_s_fast_portrait_fl'
+    landscape: 'veo_3_1-4K',
+    portrait: 'veo_3_1-4K'
   },
   reference2video: {
     landscape: 'veo_3_1_r2v_fast',
