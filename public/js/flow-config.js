@@ -31,44 +31,36 @@ const FlowConfig = {
 
   video: {
     defaultRatio: 'landscape',
-    defaultTextModel: 'veo-31-4k',
-    defaultFrameModel: 'veo-31-4k',
-    defaultReferenceModel: 'veo-31-r2v-fast',
+    defaultTextModel: 'sdas-mj-minimax-h3-2k',
+    defaultFrameModel: 'sdas-mj-minimax-h3-2k',
+    defaultReferenceModel: 'sdas-mj-minimax-h3-2k',
     textModels: {
-      'veo-31-4k': {
-        label: 'Veo 3.1 4K',
-        hint: '4K text-to-video generation',
+      'sdas-mj-minimax-h3-2k': {
+        label: 'Minimax H3 2K',
+        hint: 'OpenAPI-compatible text-to-video generation',
         models: {
-          landscape: 'veo_3_1-4K',
-          portrait: 'veo_3_1-4K'
+          landscape: 'sdas-mj-minimax-h3-2k',
+          portrait: 'sdas-mj-minimax-h3-2k'
         }
       }
     },
     frameModels: {
-      'veo-31-4k': {
-        label: 'Veo 3.1 4K',
-        hint: '4K image-to-video generation',
+      'sdas-mj-minimax-h3-2k': {
+        label: 'Minimax H3 2K',
+        hint: 'OpenAPI-compatible image-to-video generation',
         models: {
-          landscape: 'veo_3_1-4K',
-          portrait: 'veo_3_1-4K'
+          landscape: 'sdas-mj-minimax-h3-2k',
+          portrait: 'sdas-mj-minimax-h3-2k'
         }
       }
     },
     referenceModels: {
-      'veo-31-r2v-fast': {
-        label: 'Veo 3.1 R2V Fast',
-        hint: 'Reference-image video, up to 3 images',
+      'sdas-mj-minimax-h3-2k': {
+        label: 'Minimax H3 2K',
+        hint: 'OpenAPI-compatible reference-image video generation',
         models: {
-          landscape: 'veo_3_1_r2v_fast',
-          portrait: 'veo_3_1_r2v_fast_portrait'
-        }
-      },
-      'veo-31-r2v-ultra': {
-        label: 'Veo 3.1 R2V Ultra',
-        hint: 'Higher quality reference video',
-        models: {
-          landscape: 'veo_3_1_r2v_fast_ultra',
-          portrait: 'veo_3_1_r2v_fast_portrait_ultra'
+          landscape: 'sdas-mj-minimax-h3-2k',
+          portrait: 'sdas-mj-minimax-h3-2k'
         }
       }
     }

@@ -67,16 +67,16 @@ function cacheGeneratedImageBuffer(buffer, contentType) {
 const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 const DEFAULT_VIDEO_MODELS = {
   text2video: {
-    landscape: 'veo_3_1-4K',
-    portrait: 'veo_3_1-4K'
+    landscape: 'sdas-mj-minimax-h3-2k',
+    portrait: 'sdas-mj-minimax-h3-2k'
   },
   frame2video: {
-    landscape: 'veo_3_1-4K',
-    portrait: 'veo_3_1-4K'
+    landscape: 'sdas-mj-minimax-h3-2k',
+    portrait: 'sdas-mj-minimax-h3-2k'
   },
   reference2video: {
-    landscape: 'veo_3_1_r2v_fast',
-    portrait: 'veo_3_1_r2v_fast_portrait'
+    landscape: 'sdas-mj-minimax-h3-2k',
+    portrait: 'sdas-mj-minimax-h3-2k'
   }
 };
 const RATIO_MAP = {
