@@ -775,6 +775,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function buildVideoProxyUrl(videoUrl) {
+    if (typeof videoUrl === 'string' && videoUrl.startsWith('/api/')) {
+      return videoUrl;
+    }
     return `/api/proxy-video?url=${encodeURIComponent(videoUrl)}`;
   }
 

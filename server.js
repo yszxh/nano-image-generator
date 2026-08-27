@@ -98,6 +98,43 @@ const VIDEO_ASPECT_RATIO_MAP = {
   portrait: '9:16',
   landscape: '16:9'
 };
+const VIDEO_SIZE_MAP = {
+  portrait: '720x1280',
+  landscape: '1280x720'
+};
+const VIDEO_TASK_CACHE_TTL_MS = 60 * 60 * 1000;
+const VIDEO_TASK_CACHE_MAX = 50;
+const VIDEO_POLL_INTERVAL_MS = 2000;
+const videoTaskCache = new Map();
+
+function cacheGeneratedVideoTask({ apiKey, taskId }) {
+  if (videoTaskCache.size >= VIDEO_TASK_CACHE_MAX) {
+    videoTaskCache.delete(videoTaskCache.keys().next().value);
+  }
+
+  const cacheKey = uuidv4();
+  videoTaskCache.set(cacheKey, { apiKey, taskId, expiresAt: Date.now() + VIDEO_TASK_CACHE_TTL_MS });
+  return `/api/generated-video/${encodeURIComponent(cacheKey)}`;
+}
+
+function getGeneratedVideoTask(cacheKey) {
+  const entry = videoTaskCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    videoTaskCache.delete(cacheKey);
+    return null;
+  }
+  return entry;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of videoTaskCache) {
+    if (now > entry.expiresAt) {
+      videoTaskCache.delete(key);
+    }
+  }
+}, VIDEO_TASK_CACHE_TTL_MS);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -1253,6 +1290,149 @@ async function callFlow2Api({ messages, apiKey, model, type, parameters }) {
   };
 }
 
+function parseVideoTaskId(payload) {
+  const taskId = payload?.id || payload?.task_id || payload?.data?.id || payload?.data?.task_id;
+  return typeof taskId === 'string' && taskId.trim() ? taskId.trim() : '';
+}
+
+function getVideoTaskStatus(payload) {
+  return String(payload?.status || payload?.data?.status || '').trim().toLowerCase();
+}
+
+function getVideoTaskError(payload) {
+  const error = payload?.error || payload?.data?.error;
+  if (typeof error === 'string') return error;
+  if (error?.message) return error.message;
+  return '';
+}
+
+async function readOpenAiVideoJson(response, model) {
+  if (!response.ok) {
+    const errorText = await safeReadErrorText(response);
+    const classified = classifyFlow2ApiError(response.status, model, errorText);
+    throw createAppError(classified.message, {
+      status: response.status,
+      code: classified.code,
+      retryable: classified.retryable,
+      details: { upstream: parseUpstreamError(errorText) }
+    });
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    throw createAppError('Video task endpoint returned invalid JSON.', {
+      status: 502,
+      code: 'invalid_video_task_response',
+      retryable: true
+    });
+  }
+}
+
+async function fetchOpenAiVideoTask(url, apiKey, model, timeoutMs) {
+  const { controller, timeoutId } = createAbortController(timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: 'Bearer ' + apiKey },
+      signal: controller.signal
+    });
+    return await readOpenAiVideoJson(response, model);
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw createAppError('Video task status request timed out.', { status: 504, code: 'video_task_timeout', retryable: true });
+    }
+    throw error;
+  } finally {
+    clearAbortTimeout(timeoutId);
+  }
+}
+
+async function callOpenAiVideoGenerate({ prompt, apiKey, model, ratio, imageSources = [] }) {
+  const resolvedApiKey = withResolvedApiKey(apiKey);
+  if (!resolvedApiKey) {
+    throw new Error('Missing Flow2API key.');
+  }
+
+  const formData = new FormData();
+  formData.append('model', model);
+  formData.append('prompt', prompt);
+  formData.append('size', VIDEO_SIZE_MAP[ratio] || VIDEO_SIZE_MAP.landscape);
+
+  const imageSource = imageSources.find(Boolean);
+  if (imageSource) {
+    const parsed = parseDataUrl(imageSource);
+    if (!parsed) {
+      throw createAppError('Video reference image is invalid.', { status: 400, code: 'invalid_reference_image' });
+    }
+    formData.append('input_reference', new Blob([parsed.buffer], { type: parsed.mimeType }), 'input-reference.png');
+  }
+
+  const videoBaseUrl = getFlow2ApiRestBaseUrl() + '/videos';
+  const requestStartedAt = Date.now();
+  const { controller, timeoutId } = createAbortController();
+  let createdTask;
+  try {
+    const response = await fetch(videoBaseUrl, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + resolvedApiKey },
+      body: formData,
+      signal: controller.signal
+    });
+    createdTask = await readOpenAiVideoJson(response, model);
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw createAppError('Video task creation timed out.', { status: 504, code: 'video_task_timeout', retryable: true });
+    }
+    throw error;
+  } finally {
+    clearAbortTimeout(timeoutId);
+  }
+
+  const taskId = parseVideoTaskId(createdTask);
+  if (!taskId) {
+    throw createAppError('Video task endpoint did not return a task ID.', {
+      status: 502,
+      code: 'video_task_id_missing',
+      retryable: true
+    });
+  }
+
+  let task = createdTask;
+  while (true) {
+    const status = getVideoTaskStatus(task);
+    if (['completed', 'succeeded', 'success'].includes(status)) {
+      return {
+        taskId,
+        videoUrl: cacheGeneratedVideoTask({ apiKey: resolvedApiKey, taskId })
+      };
+    }
+    if (['failed', 'cancelled', 'canceled', 'error'].includes(status)) {
+      throw createAppError(getVideoTaskError(task) || 'Upstream video task failed.', {
+        status: 502,
+        code: 'video_task_failed',
+        retryable: false
+      });
+    }
+
+    const remainingMs = REQUEST_TIMEOUT_MS - (Date.now() - requestStartedAt);
+    if (remainingMs <= VIDEO_POLL_INTERVAL_MS) {
+      throw createAppError('Video generation timed out while the upstream task was still running.', {
+        status: 504,
+        code: 'video_generation_timeout',
+        retryable: true
+      });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS));
+    task = await fetchOpenAiVideoTask(
+      videoBaseUrl + '/' + encodeURIComponent(taskId),
+      resolvedApiKey,
+      model,
+      Math.min(30000, remainingMs)
+    );
+  }
+}
+
 function ensurePrompt(prompt) {
   return typeof prompt === 'string' ? prompt.trim() : '';
 }
@@ -1570,21 +1750,14 @@ app.post('/api/generate-video', async (req, res) => {
       return sendAppError(res, createAppError('Flow2API key is required.', { status: 400, code: 'api_key_required' }), 'Text-to-video failed.');
     }
 
-    const messages = [{ role: 'user', content: prompt }];
-    const result = await callFlow2Api({
-      messages,
-      apiKey,
-      model,
-      type: 'video',
-      parameters: { aspectRatio: resolveVideoAspectRatio(ratio) }
-    });
+    const result = await callOpenAiVideoGenerate({ prompt, apiKey, model, ratio });
 
     res.json({
       success: true,
       id: uuidv4(),
       prompt,
       model,
-      videoUrl: result.mediaUrl,
+      videoUrl: result.videoUrl,
       createdAt: new Date().toISOString()
     });
     logRequestTelemetry({ requestId, route: '/api/generate-video', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt });
@@ -1621,13 +1794,12 @@ app.post('/api/generate-video-from-frames', upload.fields([
       return sendAppError(res, createAppError('Start frame is required.', { status: 400, code: 'start_frame_required' }), 'Frame-to-video failed.');
     }
 
-    const messages = buildImageMessages(prompt, [startFrameBase64, endFrameBase64].filter(Boolean));
-    const result = await callFlow2Api({
-      messages,
+    const result = await callOpenAiVideoGenerate({
+      prompt,
       apiKey,
       model,
-      type: 'video',
-      parameters: { aspectRatio: resolveVideoAspectRatio(ratio) }
+      ratio,
+      imageSources: [startFrameBase64, endFrameBase64]
     });
 
     res.json({
@@ -1635,7 +1807,7 @@ app.post('/api/generate-video-from-frames', upload.fields([
       id: uuidv4(),
       prompt,
       model,
-      videoUrl: result.mediaUrl,
+      videoUrl: result.videoUrl,
       createdAt: new Date().toISOString()
     });
     logRequestTelemetry({ requestId, route: '/api/generate-video-from-frames', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { hasEndFrame: Boolean(endFrameBase64) } });
@@ -1676,13 +1848,12 @@ app.post('/api/generate-video-from-references', upload.fields([
       return sendAppError(res, createAppError('At least one reference image is required.', { status: 400, code: 'reference_images_required' }), 'Reference-to-video failed.');
     }
 
-    const messages = buildImageMessages(prompt, referenceImages);
-    const result = await callFlow2Api({
-      messages,
+    const result = await callOpenAiVideoGenerate({
+      prompt,
       apiKey,
       model,
-      type: 'video',
-      parameters: { aspectRatio: resolveVideoAspectRatio(ratio) }
+      ratio,
+      imageSources: referenceImages
     });
 
     res.json({
@@ -1690,7 +1861,7 @@ app.post('/api/generate-video-from-references', upload.fields([
       id: uuidv4(),
       prompt,
       model,
-      videoUrl: result.mediaUrl,
+      videoUrl: result.videoUrl,
       createdAt: new Date().toISOString()
     });
     logRequestTelemetry({ requestId, route: '/api/generate-video-from-references', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { referenceCount: referenceImages.length } });
@@ -1722,6 +1893,58 @@ app.get('/api/generated-image/:id', (req, res) => {
     totalMs: Date.now() - startedAt
   }));
   return res.send(cached.buffer);
+});
+
+app.get('/api/generated-video/:id', async (req, res) => {
+  const cached = getGeneratedVideoTask(req.params.id);
+  if (!cached) {
+    return res.status(404).json({ error: 'Generated video not found or expired.' });
+  }
+
+  const contentUrl = getFlow2ApiRestBaseUrl() + '/videos/' + encodeURIComponent(cached.taskId) + '/content';
+  const { controller, timeoutId } = createAbortController();
+  let upstream;
+  try {
+    const headers = { Authorization: 'Bearer ' + cached.apiKey };
+    if (req.headers.range) {
+      headers.Range = req.headers.range;
+    }
+    upstream = await fetch(contentUrl, {
+      headers,
+      signal: controller.signal
+    });
+  } catch (error) {
+    const message = error.name === 'AbortError' ? 'Generated video download timed out.' : 'Generated video download failed.';
+    return res.status(502).json({ error: message });
+  } finally {
+    clearAbortTimeout(timeoutId);
+  }
+
+  if (!upstream.ok) {
+    const errorText = await safeReadErrorText(upstream);
+    const classified = classifyFlow2ApiError(upstream.status, 'video-content', errorText);
+    return res.status(upstream.status).json({ error: classified.message, code: classified.code });
+  }
+
+  const contentType = getContentType(upstream);
+  if (!isExpectedMediaContentType(contentType, 'video/mp4') || !upstream.body) {
+    return res.status(502).json({ error: 'Generated video endpoint returned an unexpected response.' });
+  }
+
+  res.status(upstream.status);
+  res.set('Content-Type', upstream.headers.get('content-type') || 'video/mp4');
+  res.set('Cache-Control', 'private, max-age=3600');
+  if (upstream.headers.get('content-length')) {
+    res.set('Content-Length', upstream.headers.get('content-length'));
+  }
+  if (upstream.headers.get('accept-ranges')) {
+    res.set('Accept-Ranges', upstream.headers.get('accept-ranges'));
+  }
+  if (upstream.headers.get('content-range')) {
+    res.set('Content-Range', upstream.headers.get('content-range'));
+  }
+
+  return Readable.fromWeb(upstream.body).pipe(res);
 });
 
 app.get('/api/proxy-video', async (req, res) => {
