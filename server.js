@@ -2044,6 +2044,7 @@ app.get('/api/generated-image/:id', (req, res) => {
 });
 
 app.get('/api/video-tasks/:id', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   const job = getVideoJob(req.params.id);
   if (!job) {
     return res.status(404).json({
