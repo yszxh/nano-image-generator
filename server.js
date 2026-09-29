@@ -105,7 +105,11 @@ const VIDEO_SIZE_MAP = {
 const VIDEO_TASK_CACHE_TTL_MS = 60 * 60 * 1000;
 const VIDEO_TASK_CACHE_MAX = 50;
 const VIDEO_POLL_INTERVAL_MS = 2000;
+const VIDEO_JOB_TTL_MS = 2 * 60 * 60 * 1000;
+const VIDEO_JOB_MAX = 100;
+const VIDEO_JOB_TIMEOUT_MS = Number(process.env.FLOW2API_VIDEO_TIMEOUT_MS || 15 * 60 * 1000);
 const videoTaskCache = new Map();
+const videoJobCache = new Map();
 
 function cacheGeneratedVideoTask({ apiKey, taskId }) {
   if (videoTaskCache.size >= VIDEO_TASK_CACHE_MAX) {
@@ -135,6 +139,50 @@ setInterval(() => {
     }
   }
 }, VIDEO_TASK_CACHE_TTL_MS);
+
+function createVideoJob({ apiKey, taskId, prompt, model, task }) {
+  if (videoJobCache.size >= VIDEO_JOB_MAX) {
+    videoJobCache.delete(videoJobCache.keys().next().value);
+  }
+
+  const jobId = uuidv4();
+  const status = getVideoTaskStatus(task) || 'queued';
+  const progress = Number.isFinite(Number(task?.progress)) ? Number(task.progress) : 0;
+  const entry = {
+    apiKey,
+    taskId,
+    prompt,
+    model,
+    status,
+    progress: Math.max(0, Math.min(100, progress)),
+    createdAt: new Date().toISOString(),
+    updatedAt: Date.now(),
+    expiresAt: Date.now() + VIDEO_JOB_TTL_MS,
+    result: null,
+    error: null
+  };
+  videoJobCache.set(jobId, entry);
+  return { jobId, entry };
+}
+
+function getVideoJob(jobId) {
+  const entry = videoJobCache.get(jobId);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    videoJobCache.delete(jobId);
+    return null;
+  }
+  return entry;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of videoJobCache) {
+    if (now > entry.expiresAt) {
+      videoJobCache.delete(key);
+    }
+  }
+}, VIDEO_JOB_TTL_MS);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -1347,7 +1395,7 @@ async function fetchOpenAiVideoTask(url, apiKey, model, timeoutMs) {
   }
 }
 
-async function callOpenAiVideoGenerate({ prompt, apiKey, model, ratio, imageSources = [] }) {
+async function createOpenAiVideoTask({ prompt, apiKey, model, ratio, imageSources = [] }) {
   const resolvedApiKey = withResolvedApiKey(apiKey);
   if (!resolvedApiKey) {
     throw new Error('Missing Flow2API key.');
@@ -1397,40 +1445,131 @@ async function callOpenAiVideoGenerate({ prompt, apiKey, model, ratio, imageSour
     });
   }
 
-  let task = createdTask;
+  return {
+    taskId,
+    task: createdTask,
+    apiKey: resolvedApiKey
+  };
+}
+
+function updateVideoJob(jobId, updates) {
+  const entry = getVideoJob(jobId);
+  if (!entry) return null;
+  Object.assign(entry, updates, { updatedAt: Date.now() });
+  return entry;
+}
+
+async function waitForOpenAiVideoTask({ jobId, taskId, apiKey, model, initialTask }) {
+  const startedAt = Date.now();
+  const videoBaseUrl = getFlow2ApiRestBaseUrl() + '/videos';
+  let task = initialTask;
+
   while (true) {
     const status = getVideoTaskStatus(task);
+    const progressValue = Number(task?.progress ?? task?.data?.progress);
+    const progress = Number.isFinite(progressValue)
+      ? Math.max(0, Math.min(100, progressValue))
+      : 0;
+    updateVideoJob(jobId, { status: status || 'processing', progress });
+
     if (['completed', 'succeeded', 'success'].includes(status)) {
+      const videoUrl = cacheGeneratedVideoTask({ apiKey, taskId });
+      const job = getVideoJob(jobId);
+      if (job) {
+        updateVideoJob(jobId, {
+          status: 'completed',
+          progress: 100,
+          result: {
+            success: true,
+            id: jobId,
+            prompt: job.prompt,
+            model: job.model,
+            videoUrl,
+            createdAt: job.createdAt
+          }
+        });
+      }
       return {
         taskId,
-        videoUrl: cacheGeneratedVideoTask({ apiKey: resolvedApiKey, taskId })
+        videoUrl
       };
     }
     if (['failed', 'cancelled', 'canceled', 'error'].includes(status)) {
-      throw createAppError(getVideoTaskError(task) || 'Upstream video task failed.', {
+      const error = createAppError(getVideoTaskError(task) || 'Upstream video task failed.', {
         status: 502,
         code: 'video_task_failed',
         retryable: false
       });
+      updateVideoJob(jobId, {
+        status: 'failed',
+        error: { message: error.message, code: error.code, status: error.status }
+      });
+      throw error;
     }
 
-    const remainingMs = REQUEST_TIMEOUT_MS - (Date.now() - requestStartedAt);
+    const remainingMs = VIDEO_JOB_TIMEOUT_MS - (Date.now() - startedAt);
     if (remainingMs <= VIDEO_POLL_INTERVAL_MS) {
-      throw createAppError('Video generation timed out while the upstream task was still running.', {
+      const error = createAppError('Video generation timed out while the upstream task was still running.', {
         status: 504,
         code: 'video_generation_timeout',
         retryable: true
       });
+      updateVideoJob(jobId, {
+        status: 'failed',
+        error: { message: error.message, code: error.code, status: error.status }
+      });
+      throw error;
     }
 
     await new Promise((resolve) => setTimeout(resolve, VIDEO_POLL_INTERVAL_MS));
     task = await fetchOpenAiVideoTask(
       videoBaseUrl + '/' + encodeURIComponent(taskId),
-      resolvedApiKey,
+      apiKey,
       model,
       Math.min(30000, remainingMs)
     );
   }
+}
+
+function runVideoJob(jobId, taskInfo) {
+  void waitForOpenAiVideoTask({
+    jobId,
+    taskId: taskInfo.taskId,
+    apiKey: taskInfo.apiKey,
+    model: taskInfo.model,
+    initialTask: taskInfo.task
+  }).catch((error) => {
+    console.error('Video background task failed:', error);
+    const job = getVideoJob(jobId);
+    if (job && job.status !== 'failed') {
+      updateVideoJob(jobId, {
+        status: 'failed',
+        error: {
+          message: error?.message || 'Video generation failed.',
+          code: error?.code || 'video_generation_failed',
+          status: error?.status || 502
+        }
+      });
+    }
+  });
+}
+
+async function queueOpenAiVideoGenerate({ prompt, apiKey, model, ratio, imageSources = [] }) {
+  const taskInfo = await createOpenAiVideoTask({ prompt, apiKey, model, ratio, imageSources });
+  const { jobId, entry } = createVideoJob({
+    apiKey: taskInfo.apiKey,
+    taskId: taskInfo.taskId,
+    prompt,
+    model,
+    task: taskInfo.task
+  });
+  runVideoJob(jobId, { ...taskInfo, model });
+  return {
+    jobId,
+    status: entry.status,
+    progress: entry.progress,
+    createdAt: entry.createdAt
+  };
 }
 
 function ensurePrompt(prompt) {
@@ -1750,17 +1889,20 @@ app.post('/api/generate-video', async (req, res) => {
       return sendAppError(res, createAppError('Flow2API key is required.', { status: 400, code: 'api_key_required' }), 'Text-to-video failed.');
     }
 
-    const result = await callOpenAiVideoGenerate({ prompt, apiKey, model, ratio });
+    const result = await queueOpenAiVideoGenerate({ prompt, apiKey, model, ratio });
 
-    res.json({
+    res.status(202).json({
       success: true,
-      id: uuidv4(),
+      id: result.jobId,
+      jobId: result.jobId,
       prompt,
       model,
-      videoUrl: result.videoUrl,
-      createdAt: new Date().toISOString()
+      status: result.status,
+      progress: result.progress,
+      videoUrl: null,
+      createdAt: result.createdAt
     });
-    logRequestTelemetry({ requestId, route: '/api/generate-video', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt });
+    logRequestTelemetry({ requestId, route: '/api/generate-video', model, status: 202, totalMs: Date.now() - startedAt });
   } catch (error) {
     console.error('Text-to-video failed:', error);
     logRequestTelemetry({ requestId, route: '/api/generate-video', model: req.body.model || DEFAULT_VIDEO_MODELS.text2video[req.body.ratio === 'portrait' ? 'portrait' : 'landscape'], status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
@@ -1794,7 +1936,7 @@ app.post('/api/generate-video-from-frames', upload.fields([
       return sendAppError(res, createAppError('Start frame is required.', { status: 400, code: 'start_frame_required' }), 'Frame-to-video failed.');
     }
 
-    const result = await callOpenAiVideoGenerate({
+    const result = await queueOpenAiVideoGenerate({
       prompt,
       apiKey,
       model,
@@ -1802,15 +1944,18 @@ app.post('/api/generate-video-from-frames', upload.fields([
       imageSources: [startFrameBase64, endFrameBase64]
     });
 
-    res.json({
+    res.status(202).json({
       success: true,
-      id: uuidv4(),
+      id: result.jobId,
+      jobId: result.jobId,
       prompt,
       model,
-      videoUrl: result.videoUrl,
-      createdAt: new Date().toISOString()
+      status: result.status,
+      progress: result.progress,
+      videoUrl: null,
+      createdAt: result.createdAt
     });
-    logRequestTelemetry({ requestId, route: '/api/generate-video-from-frames', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { hasEndFrame: Boolean(endFrameBase64) } });
+    logRequestTelemetry({ requestId, route: '/api/generate-video-from-frames', model, status: 202, totalMs: Date.now() - startedAt, extra: { hasEndFrame: Boolean(endFrameBase64) } });
   } catch (error) {
     console.error('Frame-to-video failed:', error);
     logRequestTelemetry({ requestId, route: '/api/generate-video-from-frames', model: req.body.model || DEFAULT_VIDEO_MODELS.frame2video[req.body.ratio === 'portrait' ? 'portrait' : 'landscape'], status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
@@ -1848,7 +1993,7 @@ app.post('/api/generate-video-from-references', upload.fields([
       return sendAppError(res, createAppError('At least one reference image is required.', { status: 400, code: 'reference_images_required' }), 'Reference-to-video failed.');
     }
 
-    const result = await callOpenAiVideoGenerate({
+    const result = await queueOpenAiVideoGenerate({
       prompt,
       apiKey,
       model,
@@ -1856,15 +2001,18 @@ app.post('/api/generate-video-from-references', upload.fields([
       imageSources: referenceImages
     });
 
-    res.json({
+    res.status(202).json({
       success: true,
-      id: uuidv4(),
+      id: result.jobId,
+      jobId: result.jobId,
       prompt,
       model,
-      videoUrl: result.videoUrl,
-      createdAt: new Date().toISOString()
+      status: result.status,
+      progress: result.progress,
+      videoUrl: null,
+      createdAt: result.createdAt
     });
-    logRequestTelemetry({ requestId, route: '/api/generate-video-from-references', model, status: 200, retryCount: result.retryCount || 0, totalMs: Date.now() - startedAt, extra: { referenceCount: referenceImages.length } });
+    logRequestTelemetry({ requestId, route: '/api/generate-video-from-references', model, status: 202, totalMs: Date.now() - startedAt, extra: { referenceCount: referenceImages.length } });
   } catch (error) {
     console.error('Reference-to-video failed:', error);
     logRequestTelemetry({ requestId, route: '/api/generate-video-from-references', model: req.body.model || DEFAULT_VIDEO_MODELS.reference2video[req.body.ratio === 'portrait' ? 'portrait' : 'landscape'], status: error.status || 500, code: error.code || 'internal_error', retryable: Boolean(error.retryable), retryCount: error.details?.retryCount || 0, totalMs: Date.now() - startedAt });
@@ -1893,6 +2041,46 @@ app.get('/api/generated-image/:id', (req, res) => {
     totalMs: Date.now() - startedAt
   }));
   return res.send(cached.buffer);
+});
+
+app.get('/api/video-tasks/:id', (req, res) => {
+  const job = getVideoJob(req.params.id);
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      error: 'Video task not found or expired.',
+      code: 'video_task_not_found',
+      status: 404,
+      retryable: false
+    });
+  }
+
+  if (job.status === 'failed') {
+    return res.status(job.error?.status || 502).json({
+      success: false,
+      jobId: req.params.id,
+      status: 'failed',
+      progress: job.progress,
+      error: job.error?.message || 'Video generation failed.',
+      code: job.error?.code || 'video_generation_failed',
+      retryable: false
+    });
+  }
+
+  const response = {
+    success: true,
+    jobId: req.params.id,
+    status: job.status,
+    progress: job.progress,
+    prompt: job.prompt,
+    model: job.model,
+    createdAt: job.createdAt
+  };
+  if (job.status === 'completed' && job.result) {
+    response.result = job.result;
+    response.videoUrl = job.result.videoUrl;
+  }
+  return res.json(response);
 });
 
 app.get('/api/generated-video/:id', async (req, res) => {
