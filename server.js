@@ -1008,7 +1008,7 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
 }
 
 function isOpenAiImageModel(model) {
-  return model === 'gpt-image-2';
+  return model === 'gpt-image-2' || model === 'gpt-image-2.5';
 }
 
 async function callOpenAiImageGenerate({ prompt, apiKey, model, size, quality, background, outputFormat }) {

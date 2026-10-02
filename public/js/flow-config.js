@@ -25,6 +25,14 @@ const FlowConfig = {
         suffix: '',
         exactModel: true,
         supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
+      },
+      'gpt-image-2.5': {
+        label: 'gpt-image-2.5',
+        hint: 'OpenAI image API model',
+        prefix: 'gpt-image-2.5',
+        suffix: '',
+        exactModel: true,
+        supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
       }
     }
   },
