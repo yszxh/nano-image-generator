@@ -10,10 +10,19 @@ const FlowConfig = {
       'three-four': { label: '3:4', sublabel: '3:4' }
     },
     versions: {
+      // Keep the existing version ID to preserve saved browser preferences.
       'gemini-3.1-flash-preview': {
-        label: '（官方）gemini-3.1-flash-image-preview',
-        hint: 'Official preview image model with arbitrary ratio support',
-        prefix: 'gemini-3.1-flash-image-preview',
+        label: 'Gemini Nano Banana 2',
+        hint: 'Gemini image model with arbitrary ratio support',
+        prefix: 'gemini-3.1-flash-image',
+        suffix: '',
+        exactModel: true,
+        supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']
+      },
+      'gemini-nano-banana-2.1': {
+        label: 'gemini-nano-banana-2.1',
+        hint: 'Gemini image model with arbitrary ratio support',
+        prefix: 'gemini-nano-banana-2.1',
         suffix: '',
         exactModel: true,
         supportedRatios: ['portrait', 'landscape', 'square', 'four-three', 'three-four']

@@ -64,7 +64,12 @@ function cacheGeneratedImageBuffer(buffer, contentType) {
   imageCacheSet(cacheKey, contentType, buffer);
   return `/api/generated-image/${encodeURIComponent(cacheKey)}`;
 }
-const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
+const DEFAULT_IMAGE_MODEL = 'gemini-3.1-flash-image';
+const NANO_BANANA_IMAGE_MODELS = new Set([
+  DEFAULT_IMAGE_MODEL,
+  'gemini-nano-banana-2.1',
+  'gemini-3.1-flash-image-preview' // Preserve compatibility with existing API clients.
+]);
 const DEFAULT_VIDEO_MODELS = {
   text2video: {
     landscape: 'sdas-mj-minimax-h3-2k',
@@ -880,7 +885,7 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
 
   imageConfig.imageSize = imageSize || '1K';
 
-  const isPreviewModel = fullModel === 'gemini-3.1-flash-image-preview';
+  const isNanoBananaModel = NANO_BANANA_IMAGE_MODELS.has(fullModel);
 
   const requestContents = Array.isArray(contents) && contents.length
     ? contents
@@ -889,12 +894,12 @@ async function callGeminiGenerateContent({ contents, apiKey, model, aspectRatio,
   const payload = {
     contents: requestContents,
     generationConfig: {
-      responseModalities: isPreviewModel ? ['IMAGE', 'TEXT'] : ['IMAGE'],
+      responseModalities: isNanoBananaModel ? ['IMAGE', 'TEXT'] : ['IMAGE'],
       imageConfig
     }
   };
 
-  if (!isPreviewModel) {
+  if (!isNanoBananaModel) {
     payload.systemInstruction = {
       parts: [{ text: 'Return an image only.' }]
     };
